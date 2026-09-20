@@ -1,0 +1,8 @@
+{
+  "local_folder": "",
+  "remote_folder_id": "root",
+  "sync_interval_seconds": 60,
+  "autostart": false,
+  "dry_run": false,
+  "sync_mode": "local_master"
+}

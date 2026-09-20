@@ -1,0 +1,29 @@
+# Secrets and credentials
+credentials.json
+token.json
+config.json
+
+# Databases and state
+*.db
+*.sqlite
+sync_state_go.db
+
+# Logs and temporary files
+*.log
+*.tmp
+run_out.log
+run_err.log
+err.log
+out.log
+
+# Build artifacts and binaries
+*.exe
+dist/
+rsrc.syso
+googlesync
+
+# Python cache (legacy)
+__pycache__/
+*.pyc
+build/
+*.spec

@@ -1,0 +1,1082 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google Sync Lite</title>
+  <style>
+    :root {
+      --bg-main: #121316;
+      --bg-sidebar: #17181c;
+      --bg-card: #1d1f24;
+      --bg-card-hover: #24262c;
+      --bg-input: #15161a;
+      --border: #2b2e37;
+      --border-focus: #4b5263;
+      --text-primary: #e6e8ec;
+      --text-secondary: #9da3af;
+      --text-muted: #656b78;
+      --accent: #2e333d;
+      --accent-hover: #3a414e;
+      --accent-border: #4e5769;
+      --status-green: #4ade80;
+      --status-red: #f87171;
+      --status-blue: #60a5fa;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      user-select: none;
+    }
+
+    body {
+      background-color: var(--bg-main);
+      color: var(--text-primary);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Custom titlebar style */
+    .titlebar {
+      height: 38px;
+      background: var(--bg-sidebar);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+
+    .titlebar .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-primary);
+    }
+
+    .titlebar .brand-icon {
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--text-secondary);
+      border-radius: 50%;
+      border-top-color: transparent;
+    }
+
+    .window-controls {
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn-win {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      transition: all 0.15s;
+    }
+
+    .btn-win:hover {
+      background: var(--bg-card);
+      color: var(--text-primary);
+    }
+
+    /* App container */
+    .app-container {
+      display: flex;
+      flex: 1;
+      height: calc(100vh - 38px);
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: 220px;
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 16px 12px;
+      gap: 8px;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+
+    .nav-item:hover {
+      background: var(--bg-card);
+      color: var(--text-primary);
+    }
+
+    .nav-item.active {
+      background: var(--bg-card);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+    }
+
+    .sidebar-footer {
+      margin-top: auto;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--text-muted);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .status-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--status-red);
+    }
+
+    .dot.connected {
+      background: var(--status-green);
+    }
+
+    /* Content Area */
+    .content-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 32px;
+      background: var(--bg-main);
+    }
+
+    .page {
+      display: none;
+    }
+
+    .page.active {
+      display: block;
+    }
+
+    h2 {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 20px;
+      color: var(--text-primary);
+      letter-spacing: -0.3px;
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 16px;
+    }
+
+    .form-group:last-child {
+      margin-bottom: 0;
+    }
+
+    label {
+      font-size: 12px;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    input[type="text"], input[type="number"] {
+      flex: 1;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: var(--text-primary);
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input[type="text"]:focus, input[type="number"]:focus {
+      border-color: var(--border-focus);
+    }
+
+    /* Buttons */
+    .btn {
+      background: var(--accent);
+      color: var(--text-primary);
+      border: 1px solid var(--accent-border);
+      padding: 9px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.15s;
+    }
+
+    .btn:hover {
+      background: var(--accent-hover);
+      border-color: var(--text-muted);
+    }
+
+    .btn-primary {
+      background: #2b323f;
+      border-color: #58657d;
+      color: #ffffff;
+    }
+
+    .btn-primary:hover {
+      background: #374052;
+    }
+
+    .btn-danger {
+      background: #3b2225;
+      border-color: #7f3939;
+      color: #fca5a5;
+    }
+
+    .btn-danger:hover {
+      background: #4c282c;
+      border-color: #994444;
+      color: #ffffff;
+    }
+
+    .btn-danger:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      border-color: var(--border);
+      background: var(--bg-card);
+      color: var(--text-muted);
+    }
+
+    .mode-option {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg-input);
+      cursor: pointer;
+      transition: all 0.15s;
+      margin-bottom: 8px;
+    }
+
+    .mode-option:hover {
+      border-color: var(--border-focus);
+      background: var(--bg-card-hover);
+    }
+
+    .mode-option.selected {
+      border-color: #58657d;
+      background: #1c2029;
+    }
+
+    .mode-option input[type="radio"] {
+      margin-top: 3px;
+      accent-color: #60a5fa;
+      cursor: pointer;
+    }
+
+    .mode-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .mode-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .mode-desc {
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 1.35;
+    }
+
+    .btn-sm {
+      padding: 8px 12px;
+      font-size: 12px;
+    }
+
+    /* Switch toggle */
+    .switch-container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 0;
+    }
+
+    .switch-label {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .switch-desc {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: var(--bg-input);
+      border: 1px solid var(--border);
+      transition: .2s;
+      border-radius: 24px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      bottom: 3px;
+      background-color: var(--text-secondary);
+      transition: .2s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider {
+      background-color: var(--accent-border);
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(20px);
+      background-color: #ffffff;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-radius: 50%;
+      border-top-color: #ffffff;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .sync-status-bar {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+    }
+
+    .sync-status-bar.syncing {
+      border-color: var(--accent-border);
+      background: #191c22;
+    }
+
+    .sync-status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 500;
+    }
+
+    /* Modal dialog */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(2px);
+      z-index: 999;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-overlay.active {
+      display: flex;
+    }
+
+    .modal-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-focus);
+      border-radius: 12px;
+      width: 520px;
+      max-width: 90vw;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+
+    .modal-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .modal-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .modal-body {
+      padding: 16px 20px;
+      overflow-y: auto;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .modal-footer {
+      padding: 14px 20px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .folder-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 260px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg-input);
+      padding: 6px;
+    }
+
+    .folder-item {
+      padding: 10px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      color: var(--text-primary);
+      transition: background 0.15s;
+    }
+
+    .folder-item:hover {
+      background: var(--bg-card-hover);
+    }
+
+    .folder-item.selected {
+      background: #2b323f;
+      border: 1px solid #58657d;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top bar -->
+  <div class="titlebar">
+    <div class="brand">
+      <div class="brand-icon"></div>
+      <span>Google Sync Lite</span>
+    </div>
+    <div class="window-controls">
+      <button class="btn-win" onclick="minimizeToTray()">Свернуть в трей</button>
+      <button class="btn-win" onclick="window.close()">✕</button>
+    </div>
+  </div>
+
+  <div class="app-container">
+    <!-- Sidebar -->
+    <div class="sidebar">
+      <div class="nav-item active" onclick="switchTab('dashboard')">
+        <span>Обзор</span>
+      </div>
+      <div class="nav-item" onclick="switchTab('settings')">
+        <span>Настройки</span>
+      </div>
+      <div class="nav-item" onclick="switchTab('logs')">
+        <span>Журнал событий</span>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="status-indicator">
+          <div class="dot" id="authDot"></div>
+          <span id="authStatusText">Не авторизован</span>
+        </div>
+        <span style="font-size: 10px; margin-top: 4px;">Zero-loss MD5 Engine</span>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="content-area">
+
+      <!-- Tab: Dashboard -->
+      <div id="page-dashboard" class="page active">
+        <h2>Состояние синхронизации</h2>
+
+        <!-- Live Sync Status Banner -->
+        <div class="sync-status-bar" id="syncStatusBar">
+          <div class="sync-status-pill">
+            <span id="syncStatusIcon" style="font-size: 16px;">●</span>
+            <span id="syncStatusText" style="font-weight: 600;">Готов к работе</span>
+          </div>
+          <span id="lastSyncTimeText" style="color: var(--text-muted); font-size: 12px;">Синхронизация не запускалась</span>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Быстрые действия</div>
+          <div class="actions-grid">
+            <button class="btn btn-primary" id="btnSyncAction" onclick="triggerSync()">
+              <span id="syncBtnIcon">🔄</span> <span id="syncBtnLabel">Синхронизировать сейчас</span>
+            </button>
+            <button class="btn btn-danger" id="btnStopAction" onclick="triggerStop()" disabled>
+              <span>⏹</span> <span>Остановить</span>
+            </button>
+            <button class="btn" onclick="triggerVerify()">
+              <span>🛡</span> Самопроверка (MD5)
+            </button>
+            <button class="btn" onclick="openLocalExplorer()">
+              <span>📂</span> Открыть в Проводнике
+            </button>
+            <button class="btn" onclick="triggerAuth()">
+              <span>🔑</span> Войти через Google
+            </button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Режим синхронизации</div>
+          <div class="mode-option selected" id="modeOptLocalMaster" onclick="selectSyncMode('local_master')">
+            <input type="radio" name="syncMode" id="radioModeLocalMaster" value="local_master" checked>
+            <div class="mode-info">
+              <span class="mode-title">Локальный диск как основа (Master / Mirror)</span>
+              <span class="mode-desc">ПК является главным источником правды. Любые новые и измененные файлы загружаются в Google Drive. Изменения из облака не затирают файлы на диске. Оптимально для больших архивов (115 000+ файлов).</span>
+            </div>
+          </div>
+          <div class="mode-option" id="modeOptTwoWay" onclick="selectSyncMode('two_way')">
+            <input type="radio" name="syncMode" id="radioModeTwoWay" value="two_way">
+            <div class="mode-info">
+              <span class="mode-title">Двусторонняя синхронизация (Two-Way Sync)</span>
+              <span class="mode-desc">Изменения синхронизируются в обе стороны с автоматическим созданием безопасных копий при возникновении конфликтов.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Активные папки синхронизации</div>
+          <div class="form-group">
+            <label>Локальная папка на диске:</label>
+            <div class="input-row">
+              <input type="text" id="dashLocalFolder" readonly>
+              <button class="btn btn-primary btn-sm" onclick="chooseLocalFolder()">📁 Выбрать папку...</button>
+              <button class="btn btn-sm" onclick="openLocalExplorer()" title="Открыть эту папку в Проводнике Windows">Проводник</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Папка Google Drive (ID):</label>
+            <div class="input-row">
+              <input type="text" id="dashRemoteFolder" readonly>
+              <button class="btn btn-primary btn-sm" onclick="openDrivePicker()">☁ Выбрать в облаке...</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Mini Live Activity Stream directly on Dashboard -->
+        <div class="card" style="margin-bottom: 0;">
+          <div class="card-title">
+            <span>Текущая активность</span>
+            <span style="font-size: 11px; font-weight: normal; color: var(--text-muted); cursor: pointer;" onclick="switchTab('logs')">Полный журнал →</span>
+          </div>
+          <div id="dashRecentLog" style="background: var(--bg-input); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-family: 'Cascadia Code', Consolas, monospace; font-size: 11px; color: var(--text-secondary); max-height: 110px; overflow-y: auto; white-space: pre-wrap; line-height: 1.4;">Нажмите «Синхронизировать сейчас» для запуска процесса.</div>
+        </div>
+      </div>
+
+      <!-- Tab: Settings -->
+      <div id="page-settings" class="page">
+        <h2>Настройки</h2>
+
+        <div class="card">
+          <div class="card-title">Режим работы</div>
+          <div class="mode-option selected" id="cfgModeOptLocalMaster" onclick="selectSyncMode('local_master')">
+            <input type="radio" name="cfgSyncMode" id="cfgRadioModeLocalMaster" value="local_master" checked>
+            <div class="mode-info">
+              <span class="mode-title">Локальный диск как основа (Master / Mirror)</span>
+              <span class="mode-desc">Локальный ПК — первоисточник. Облако зеркалирует диск. Быстрое кэширование по MD5/mtime.</span>
+            </div>
+          </div>
+          <div class="mode-option" id="cfgModeOptTwoWay" onclick="selectSyncMode('two_way')">
+            <input type="radio" name="cfgSyncMode" id="cfgRadioModeTwoWay" value="two_way">
+            <div class="mode-info">
+              <span class="mode-title">Двусторонняя синхронизация (Two-Way)</span>
+              <span class="mode-desc">Файлы передаются в обе стороны (Local ↔ Cloud).</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Папки синхронизации</div>
+          
+          <div class="form-group">
+            <label>Локальная папка на ПК</label>
+            <div class="input-row">
+              <input type="text" id="cfgLocalFolder" readonly>
+              <button class="btn btn-primary btn-sm" onclick="chooseLocalFolder()">📁 Выбрать папку...</button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Целевая папка на Google Диске</label>
+            <div class="input-row">
+              <input type="text" id="cfgRemoteFolder" readonly placeholder="Корневая папка (root)">
+              <button class="btn btn-sm" onclick="openDrivePicker()">☁ Выбрать в облаке...</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Автоматизация</div>
+          <div class="switch-container">
+            <div class="switch-label">
+              <span>Автозапуск с Windows</span>
+              <span class="switch-desc">Запускать при включении ПК тихо в системный трей</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="cfgAutostart" onchange="toggleAutostart(this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="form-group" style="margin-top: 16px;">
+            <label>Интервал проверки (в минутах)</label>
+            <input type="number" id="cfgInterval" min="1" max="1440" style="max-width: 140px;">
+          </div>
+        </div>
+
+        <button class="btn btn-primary" onclick="saveSettings()">Сохранить параметры</button>
+      </div>
+
+      <!-- Tab: Logs -->
+      <div id="page-logs" class="page">
+        <h2>Журнал работы</h2>
+        <div class="log-box" id="logBox">Ожидание команд...</div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Modal Dialog: Google Drive Folder Picker -->
+  <div class="modal-overlay" id="driveModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title">Выбор папки на Google Диске</div>
+        <button class="btn-win" onclick="closeDrivePicker()">✕</button>
+      </div>
+      <div class="modal-body">
+        <label>Доступные папки в облаке:</label>
+        <div class="folder-list" id="driveFolderList">
+          <div style="padding: 12px; color: var(--text-muted);">Загрузка списка папок...</div>
+        </div>
+
+        <div style="margin-top: 6px;">
+          <label>Или создать новую папку на Диске:</label>
+          <div class="input-row" style="margin-top: 4px;">
+            <input type="text" id="newFolderName" placeholder="Название новой папки">
+            <button class="btn btn-sm" onclick="createDriveFolder()">Создать</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm" onclick="closeDrivePicker()">Отмена</button>
+        <button class="btn btn-primary btn-sm" onclick="confirmDrivePicker()">Выбрать эту папку</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let selectedDriveFolderId = 'root';
+    let selectedDriveFolderName = 'Мой Диск (Корень)';
+
+    function switchTab(name) {
+      document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.page').forEach(el => el.classList.remove('active'));
+      
+      const tabIdx = name === 'dashboard' ? 0 : name === 'settings' ? 1 : 2;
+      document.querySelectorAll('.nav-item')[tabIdx].classList.add('active');
+      document.getElementById('page-' + name).classList.add('active');
+    }
+
+    function appendLog(msg) {
+      const box = document.getElementById('logBox');
+      box.textContent += msg + '\n';
+      box.scrollTop = box.scrollHeight;
+
+      // Also update dashboard recent log box
+      const mini = document.getElementById('dashRecentLog');
+      if (mini) {
+        mini.textContent += msg + '\n';
+        mini.scrollTop = mini.scrollHeight;
+      }
+    }
+
+    async function loadStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        
+        const dot = document.getElementById('authDot');
+        const txt = document.getElementById('authStatusText');
+        if (data.authenticated) {
+          dot.classList.add('connected');
+          txt.textContent = 'Подключено к Drive';
+        } else {
+          dot.classList.remove('connected');
+          txt.textContent = 'Требуется вход';
+        }
+
+        document.getElementById('dashLocalFolder').value = data.config.local_folder;
+        document.getElementById('dashRemoteFolder').value = data.config.remote_folder_id;
+        document.getElementById('cfgLocalFolder').value = data.config.local_folder;
+        document.getElementById('cfgRemoteFolder').value = data.config.remote_folder_id;
+        document.getElementById('cfgAutostart').checked = data.config.autostart;
+        document.getElementById('cfgInterval').value = Math.max(1, Math.floor(data.config.sync_interval_seconds / 60));
+
+        // Update Sync Mode
+        if (data.config.sync_mode) {
+          currentSyncMode = data.config.sync_mode;
+          const isLocal = currentSyncMode === 'local_master';
+          const optLocal = document.getElementById('modeOptLocalMaster');
+          const optTwoWay = document.getElementById('modeOptTwoWay');
+          const radioLocal = document.getElementById('radioModeLocalMaster');
+          const radioTwoWay = document.getElementById('radioModeTwoWay');
+          if (optLocal && optTwoWay && radioLocal && radioTwoWay) {
+            optLocal.classList.toggle('selected', isLocal);
+            optTwoWay.classList.toggle('selected', !isLocal);
+            radioLocal.checked = isLocal;
+            radioTwoWay.checked = !isLocal;
+          }
+          const cfgOptLocal = document.getElementById('cfgModeOptLocalMaster');
+          const cfgOptTwoWay = document.getElementById('cfgModeOptTwoWay');
+          const cfgRadioLocal = document.getElementById('cfgRadioModeLocalMaster');
+          const cfgRadioTwoWay = document.getElementById('cfgRadioModeTwoWay');
+          if (cfgOptLocal && cfgOptTwoWay && cfgRadioLocal && cfgRadioTwoWay) {
+            cfgOptLocal.classList.toggle('selected', isLocal);
+            cfgOptTwoWay.classList.toggle('selected', !isLocal);
+            cfgRadioLocal.checked = isLocal;
+            cfgRadioTwoWay.checked = !isLocal;
+          }
+        }
+
+        // Update live sync status banner & Stop button
+        const sBar = document.getElementById('syncStatusBar');
+        const sIcon = document.getElementById('syncStatusIcon');
+        const sText = document.getElementById('syncStatusText');
+        const sTime = document.getElementById('lastSyncTimeText');
+        const sBtnIcon = document.getElementById('syncBtnIcon');
+        const sBtnLabel = document.getElementById('syncBtnLabel');
+        const btnStop = document.getElementById('btnStopAction');
+
+        if (data.is_syncing) {
+          sBar.classList.add('syncing');
+          sIcon.className = 'spinner';
+          sIcon.textContent = '';
+          sText.textContent = 'Идет синхронизация файлов...';
+          sText.style.color = '#60a5fa';
+          sBtnIcon.className = 'spinner';
+          sBtnIcon.textContent = '';
+          sBtnLabel.textContent = 'Синхронизация...';
+          if (btnStop) {
+            btnStop.disabled = false;
+            btnStop.innerHTML = '<span>⏹</span> <span>Остановить</span>';
+          }
+        } else {
+          sBar.classList.remove('syncing');
+          sIcon.className = '';
+          sIcon.textContent = '●';
+          sIcon.style.color = '#4ade80';
+          sText.textContent = data.last_sync_msg || 'Готов к работе';
+          sText.style.color = '#e6e8ec';
+          sBtnIcon.className = '';
+          sBtnIcon.textContent = '🔄';
+          sBtnLabel.textContent = 'Синхронизировать сейчас';
+          if (btnStop) {
+            btnStop.disabled = true;
+            btnStop.innerHTML = '<span>⏹</span> <span>Остановить</span>';
+          }
+          if (data.last_sync_time) {
+            sTime.textContent = 'Посл. синхронизация: ' + data.last_sync_time;
+          }
+        }
+      } catch (err) {
+        console.error("Status load failed", err);
+      }
+    }
+
+    async function chooseLocalFolder() {
+      appendLog('[*] Открываем диалог выбора локальной папки Windows...');
+      try {
+        const res = await fetch('/api/choose-local-folder');
+        const data = await res.json();
+        if (data.folder && data.folder.trim() !== '') {
+          document.getElementById('cfgLocalFolder').value = data.folder;
+          appendLog(`[+] Выбрана папка: ${data.folder}`);
+          saveSettings();
+        }
+      } catch (err) {
+        appendLog(`[!] Ошибка выбора папки: ${err}`);
+      }
+    }
+
+    async function openLocalExplorer() {
+      await fetch('/api/open-local-folder');
+    }
+
+    async function openDrivePicker() {
+      document.getElementById('driveModal').classList.add('active');
+      const listContainer = document.getElementById('driveFolderList');
+      listContainer.innerHTML = '<div style="padding: 12px; color: var(--text-muted);">Загрузка списка папок с Google Диска...</div>';
+
+      try {
+        const res = await fetch('/api/drive-folders');
+        if (!res.ok) {
+          listContainer.innerHTML = '<div style="padding: 12px; color: var(--status-red);">Сначала выполните авторизацию в Google Drive</div>';
+          return;
+        }
+        const data = await res.json();
+        listContainer.innerHTML = '';
+
+        data.folders.forEach(f => {
+          const item = document.createElement('div');
+          item.className = 'folder-item' + (f.id === selectedDriveFolderId ? ' selected' : '');
+          item.innerHTML = `<span>📁</span> <span>${f.name}</span>`;
+          item.onclick = () => {
+            document.querySelectorAll('.folder-item').forEach(el => el.classList.remove('selected'));
+            item.classList.add('selected');
+            selectedDriveFolderId = f.id;
+            selectedDriveFolderName = f.name;
+          };
+          listContainer.appendChild(item);
+        });
+      } catch (err) {
+        listContainer.innerHTML = `<div style="padding: 12px; color: var(--status-red);">Ошибка: ${err}</div>`;
+      }
+    }
+
+    function closeDrivePicker() {
+      document.getElementById('driveModal').classList.remove('active');
+    }
+
+    function confirmDrivePicker() {
+      document.getElementById('cfgRemoteFolder').value = selectedDriveFolderId;
+      document.getElementById('dashRemoteFolder').value = selectedDriveFolderId;
+      appendLog(`[+] Выбрана папка Google Drive: ${selectedDriveFolderName} (${selectedDriveFolderId})`);
+      closeDrivePicker();
+      saveSettings();
+    }
+
+    async function createDriveFolder() {
+      const nameInput = document.getElementById('newFolderName');
+      const name = nameInput.value.trim();
+      if (!name) return;
+
+      appendLog(`[*] Создание папки на Диске: ${name}...`);
+      try {
+        const res = await fetch('/api/drive-create-folder', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name, parent_id: selectedDriveFolderId })
+        });
+        if (res.ok) {
+          const folder = await res.json();
+          nameInput.value = '';
+          appendLog(`[+] Папка '${folder.name}' создана.`);
+          openDrivePicker();
+        }
+      } catch (err) {
+        appendLog(`[!] Ошибка создания папки: ${err}`);
+      }
+    }
+
+    let currentSyncMode = 'local_master';
+
+    function selectSyncMode(mode) {
+      currentSyncMode = mode;
+      // Update radio and active classes in Dashboard
+      const isLocal = mode === 'local_master';
+      const optLocal = document.getElementById('modeOptLocalMaster');
+      const optTwoWay = document.getElementById('modeOptTwoWay');
+      const radioLocal = document.getElementById('radioModeLocalMaster');
+      const radioTwoWay = document.getElementById('radioModeTwoWay');
+      if (optLocal && optTwoWay && radioLocal && radioTwoWay) {
+        optLocal.classList.toggle('selected', isLocal);
+        optTwoWay.classList.toggle('selected', !isLocal);
+        radioLocal.checked = isLocal;
+        radioTwoWay.checked = !isLocal;
+      }
+      // Update radio and active classes in Settings
+      const cfgOptLocal = document.getElementById('cfgModeOptLocalMaster');
+      const cfgOptTwoWay = document.getElementById('cfgModeOptTwoWay');
+      const cfgRadioLocal = document.getElementById('cfgRadioModeLocalMaster');
+      const cfgRadioTwoWay = document.getElementById('cfgRadioModeTwoWay');
+      if (cfgOptLocal && cfgOptTwoWay && cfgRadioLocal && cfgRadioTwoWay) {
+        cfgOptLocal.classList.toggle('selected', isLocal);
+        cfgOptTwoWay.classList.toggle('selected', !isLocal);
+        cfgRadioLocal.checked = isLocal;
+        cfgRadioTwoWay.checked = !isLocal;
+      }
+      appendLog(`[*] Выбран режим: ${isLocal ? 'Локальный диск как основа (Master)' : 'Двусторонняя синхронизация'}`);
+      saveSettings();
+    }
+
+    async function triggerStop() {
+      appendLog('[*] Запрос немедленной остановки синхронизации...');
+      const btnStop = document.getElementById('btnStopAction');
+      if (btnStop) {
+        btnStop.disabled = true;
+        btnStop.textContent = 'Остановка...';
+      }
+      try {
+        await fetch('/api/sync/stop', { method: 'POST' });
+      } catch (err) {
+        appendLog(`[!] Ошибка вызова остановки: ${err}`);
+      }
+      setTimeout(loadStatus, 500);
+    }
+
+    async function triggerSync() {
+      appendLog('[*] Запуск синхронизации...');
+      await fetch('/api/sync', { method: 'POST' });
+      loadStatus();
+    }
+
+    async function triggerVerify() {
+      appendLog('[*] Запуск самопроверки MD5...');
+      await fetch('/api/verify', { method: 'POST' });
+      loadStatus();
+    }
+
+    async function triggerAuth() {
+      appendLog('[*] Открываем браузер для авторизации Google...');
+      await fetch('/api/auth', { method: 'POST' });
+    }
+
+    async function toggleAutostart(enabled) {
+      await fetch('/api/autostart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autostart: enabled })
+      });
+      appendLog(`[*] Автозапуск Windows: ${enabled ? 'ВКЛ' : 'ВЫКЛ'}`);
+    }
+
+    async function saveSettings() {
+      const intervalMin = parseInt(document.getElementById('cfgInterval').value) || 1;
+      const cfg = {
+        local_folder: document.getElementById('cfgLocalFolder').value.trim(),
+        remote_folder_id: document.getElementById('cfgRemoteFolder').value.trim() || 'root',
+        sync_interval_seconds: intervalMin * 60,
+        autostart: document.getElementById('cfgAutostart').checked,
+        sync_mode: currentSyncMode
+      };
+
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg)
+      });
+      appendLog('[+] Настройки синхронизации сохранены.');
+      loadStatus();
+    }
+
+    function minimizeToTray() {
+      window.close();
+    }
+
+    // Server-Sent Events (SSE) for real-time live logs
+    const eventSource = new EventSource('/api/events');
+    eventSource.onmessage = function(event) {
+      appendLog(event.data);
+      loadStatus();
+    };
+
+    window.onload = function() {
+      loadStatus();
+      setInterval(loadStatus, 3000);
+    };
+  </script>
+</body>
+</html>

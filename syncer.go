@@ -1,0 +1,878 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	pathPkg "path"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"google.golang.org/api/drive/v3"
+)
+
+type DriveFileMeta struct {
+	ID           string
+	Name         string
+	Size         int64
+	MD5          string
+	ModifiedTime string
+	ParentID     string
+	IsDir        bool
+}
+
+type SyncSummary struct {
+	VerifiedCount int
+	UploadedCount int
+	DownloadCount int
+	DeletedCount  int
+	ConflictCount int
+}
+
+type SyncEngineGo struct {
+	srv         *drive.Service
+	db          *Database
+	localRoot   string
+	remoteRoot  string
+	foldersMap  map[string]string // relPath -> remote folder ID
+	logCallback func(string)
+}
+
+func NewSyncEngineGo(srv *drive.Service, db *Database, localRoot, remoteRoot string, logCb func(string)) *SyncEngineGo {
+	return &SyncEngineGo{
+		srv:         srv,
+		db:          db,
+		localRoot:   localRoot,
+		remoteRoot:  remoteRoot,
+		foldersMap:  make(map[string]string),
+		logCallback: logCb,
+	}
+}
+
+func (s *SyncEngineGo) log(msg string) {
+	if s.logCallback != nil {
+		s.logCallback(msg)
+	}
+}
+
+// LocalChanges tracks only what changed locally compared to database
+type LocalChanges struct {
+	NewOrChanged map[string]FileState
+	Deleted      []string
+	TotalScanned int
+}
+
+// ScanLocalDelta quickly scans the local directory, comparing size + mtime with DB on-the-fly.
+// Unchanged files are NOT added to the processing queue.
+func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]FileState) (*LocalChanges, error) {
+	if err := os.MkdirAll(s.localRoot, 0755); err != nil {
+		return nil, err
+	}
+
+	seenPaths := make(map[string]bool)
+	changes := &LocalChanges{
+		NewOrChanged: make(map[string]FileState),
+	}
+
+	count := 0
+	lastReport := time.Now()
+
+	err := filepath.Walk(s.localRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if info.IsDir() {
+			name := info.Name()
+			if strings.HasPrefix(name, ".") || name == "__pycache__" || name == "$RECYCLE.BIN" || name == "System Volume Information" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		name := info.Name()
+		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".tmp") {
+			return nil
+		}
+
+		rel, err := filepath.Rel(s.localRoot, path)
+		if err != nil {
+			return nil
+		}
+		cleanRel := filepath.ToSlash(rel)
+		seenPaths[cleanRel] = true
+
+		fileMTime := float64(info.ModTime().Unix())
+		fileSize := info.Size()
+
+		count++
+		if count%10000 == 0 || time.Since(lastReport) > 2*time.Second {
+			s.log(fmt.Sprintf("    Просканировано локально: %d файлов...", count))
+			lastReport = time.Now()
+		}
+
+		// Check if file is completely unchanged in DB
+		if stored != nil {
+			if st, exists := stored[cleanRel]; exists {
+				if st.Size == fileSize && st.MTime == fileMTime && st.MD5 != "" {
+					// Perfectly identical to DB record -> SKIP!
+					return nil
+				}
+			}
+		}
+
+		// File is either NEW or MODIFIED
+		changes.NewOrChanged[cleanRel] = FileState{
+			RelPath: cleanRel,
+			Size:    fileSize,
+			MTime:   fileMTime,
+			IsDir:   false,
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for files deleted locally that exist in DB
+	for p := range stored {
+		if !seenPaths[p] {
+			changes.Deleted = append(changes.Deleted, p)
+		}
+	}
+
+	changes.TotalScanned = count
+	return changes, nil
+}
+
+func (s *SyncEngineGo) GetOrComputeMD5(ctx context.Context, relPath string, loc FileState) (string, error) {
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if loc.MD5 != "" {
+		return loc.MD5, nil
+	}
+	localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(relPath))
+	hash, err := ComputeMD5(localFullPath)
+	if err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
+func (s *SyncEngineGo) FetchRemoteTree(ctx context.Context) (map[string]DriveFileMeta, error) {
+	filesMap := make(map[string]DriveFileMeta)
+	s.foldersMap = make(map[string]string)
+	s.foldersMap[""] = s.remoteRoot
+
+	rootID := s.remoteRoot
+	if rootID == "root" {
+		rootFile, err := s.srv.Files.Get("root").Fields("id").Context(ctx).Do()
+		if err == nil && rootFile != nil {
+			rootID = rootFile.Id
+		}
+	}
+
+	type rawDriveItem struct {
+		id           string
+		name         string
+		mimeType     string
+		parentID     string
+		md5          string
+		size         int64
+		modifiedTime string
+		isFolder     bool
+	}
+
+	children := make(map[string][]rawDriveItem)
+	pageToken := ""
+	scannedCount := 0
+	lastLog := time.Now()
+
+	s.log("[*] Загрузка метаданных файлов из Google Drive...")
+
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		call := s.srv.Files.List().
+			Q("trashed = false").
+			Spaces("drive").
+			Fields("nextPageToken, files(id, name, mimeType, parents, md5Checksum, size, modifiedTime)").
+			PageSize(1000)
+
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+
+		r, err := call.Context(ctx).Do()
+		if err != nil {
+			return nil, fmt.Errorf("ошибка чтения Google Drive: %w", err)
+		}
+
+		for _, f := range r.Files {
+			pID := ""
+			if len(f.Parents) > 0 {
+				pID = f.Parents[0]
+			}
+			isFolder := (f.MimeType == "application/vnd.google-apps.folder")
+			item := rawDriveItem{
+				id:           f.Id,
+				name:         f.Name,
+				mimeType:     f.MimeType,
+				parentID:     pID,
+				md5:          f.Md5Checksum,
+				size:         f.Size,
+				modifiedTime: f.ModifiedTime,
+				isFolder:     isFolder,
+			}
+			children[pID] = append(children[pID], item)
+		}
+
+		scannedCount += len(r.Files)
+		if time.Since(lastLog) > 2*time.Second {
+			s.log(fmt.Sprintf("    Индексация Google Drive: получено %d элементов...", scannedCount))
+			lastLog = time.Now()
+		}
+
+		pageToken = r.NextPageToken
+		if pageToken == "" {
+			break
+		}
+	}
+
+	s.log(fmt.Sprintf("[*] Построение дерева каталогов (всего элементов: %d)...", scannedCount))
+
+	type queueItem struct {
+		id   string
+		path string
+	}
+	var queue []queueItem
+	queue = append(queue, queueItem{id: rootID, path: ""})
+	if rootID != "root" {
+		queue = append(queue, queueItem{id: "root", path: ""})
+	}
+
+	visitedFolders := make(map[string]bool)
+
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+
+		if visitedFolders[curr.id] && curr.id != rootID && curr.id != "root" {
+			continue
+		}
+		visitedFolders[curr.id] = true
+
+		for _, child := range children[curr.id] {
+			childRelPath := child.name
+			if curr.path != "" {
+				childRelPath = curr.path + "/" + child.name
+			}
+
+			if child.isFolder {
+				s.foldersMap[childRelPath] = child.id
+				queue = append(queue, queueItem{id: child.id, path: childRelPath})
+			} else {
+				filesMap[childRelPath] = DriveFileMeta{
+					ID:           child.id,
+					Name:         child.name,
+					Size:         child.size,
+					MD5:          child.md5,
+					ModifiedTime: child.modifiedTime,
+					ParentID:     curr.id,
+					IsDir:        false,
+				}
+			}
+		}
+	}
+
+	s.log(fmt.Sprintf("[✓] Дерево Google Drive сформировано: %d папок, %d файлов.", len(s.foldersMap), len(filesMap)))
+	return filesMap, nil
+}
+
+// FetchRemoteDelta fetches ONLY files modified in Google Drive after lastSyncRFC3339.
+// If lastSyncRFC3339 is empty, falls back to full FetchRemoteTree.
+func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 string) (map[string]DriveFileMeta, bool, error) {
+	if lastSyncRFC3339 == "" {
+		tree, err := s.FetchRemoteTree(ctx)
+		return tree, false, err
+	}
+
+	// Query only files changed since last sync
+	query := fmt.Sprintf("modifiedTime > '%s' and trashed = false", lastSyncRFC3339)
+	s.log(fmt.Sprintf("[*] Запрос изменений в Google Drive (с %s)...", lastSyncRFC3339))
+
+	filesMap := make(map[string]DriveFileMeta)
+	pageToken := ""
+
+	for {
+		if ctx.Err() != nil {
+			return nil, true, ctx.Err()
+		}
+
+		call := s.srv.Files.List().
+			Q(query).
+			Spaces("drive").
+			Fields("nextPageToken, files(id, name, mimeType, md5Checksum, modifiedTime, size, parents)").
+			PageSize(100)
+
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+
+		r, err := call.Context(ctx).Do()
+		if err != nil {
+			s.log(fmt.Sprintf("[!] Ошибка дельта-запроса (%v), переключение на полное дерево...", err))
+			tree, err := s.FetchRemoteTree(ctx)
+			return tree, false, err
+		}
+
+		for _, f := range r.Files {
+			if f.MimeType != "application/vnd.google-apps.folder" {
+				filesMap[f.Name] = DriveFileMeta{
+					ID:           f.Id,
+					Name:         f.Name,
+					Size:         f.Size,
+					MD5:          f.Md5Checksum,
+					ModifiedTime: f.ModifiedTime,
+					IsDir:        false,
+				}
+			}
+		}
+
+		pageToken = r.NextPageToken
+		if pageToken == "" {
+			break
+		}
+	}
+
+	return filesMap, true, nil
+}
+
+func (s *SyncEngineGo) EnsureRemoteFolder(ctx context.Context, relDir string) (string, error) {
+	relDir = filepath.ToSlash(relDir)
+	relDir = strings.Trim(strings.ReplaceAll(relDir, "\\", "/"), "/")
+	if relDir == "" || relDir == "." {
+		return s.remoteRoot, nil
+	}
+
+	parts := strings.Split(relDir, "/")
+	accum := ""
+	parentID := s.remoteRoot
+
+	for _, part := range parts {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		part = strings.TrimSpace(part)
+		if part == "" || part == "." {
+			continue
+		}
+		if accum == "" {
+			accum = part
+		} else {
+			accum = accum + "/" + part
+		}
+
+		if id, exists := s.foldersMap[accum]; exists {
+			parentID = id
+		} else {
+			// Check if folder already exists in Google Drive under parentID
+			escapedPart := strings.ReplaceAll(part, "\\", "\\\\")
+			escapedPart = strings.ReplaceAll(escapedPart, "'", "\\'")
+			q := fmt.Sprintf("'%s' in parents and name = '%s' and mimeType = 'application/vnd.google-apps.folder' and trashed = false", parentID, escapedPart)
+			listCall := s.srv.Files.List().Q(q).Spaces("drive").Fields("files(id)").PageSize(1)
+			r, err := listCall.Context(ctx).Do()
+			if err == nil && len(r.Files) > 0 {
+				s.foldersMap[accum] = r.Files[0].Id
+				parentID = r.Files[0].Id
+			} else {
+				s.log(fmt.Sprintf("[*] Создание удаленной папки: %s", accum))
+				fMeta := &drive.File{
+					Name:     part,
+					MimeType: "application/vnd.google-apps.folder",
+					Parents:  []string{parentID},
+				}
+				folder, err := s.srv.Files.Create(fMeta).Fields("id").Context(ctx).Do()
+				if err != nil {
+					return "", fmt.Errorf("ошибка создания папки %s: %w", accum, err)
+				}
+				s.foldersMap[accum] = folder.Id
+				parentID = folder.Id
+			}
+		}
+	}
+	return parentID, nil
+}
+
+func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, expectedMD5 string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	tmpDest := localDestPath + ".tmp"
+	_ = os.MkdirAll(filepath.Dir(localDestPath), 0755)
+
+	resp, err := s.srv.Files.Get(fileID).Context(ctx).Download()
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	out, err := os.Create(tmpDest)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.Copy(out, resp.Body)
+	out.Close()
+	if err != nil {
+		os.Remove(tmpDest)
+		return err
+	}
+
+	// Verify MD5 before moving
+	if expectedMD5 != "" {
+		chkMD5, err := ComputeMD5(tmpDest)
+		if err == nil && chkMD5 != expectedMD5 {
+			os.Remove(tmpDest)
+			return fmt.Errorf("ошибка целостности MD5 для %s (ожидался: %s, получен: %s)", localDestPath, expectedMD5, chkMD5)
+		}
+	}
+
+	_ = os.Remove(localDestPath)
+	return os.Rename(tmpDest, localDestPath)
+}
+
+func (s *SyncEngineGo) UploadFile(ctx context.Context, localPath, parentID, remoteName string) (*drive.File, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	f, err := os.Open(localPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	driveFile := &drive.File{
+		Name:    remoteName,
+		Parents: []string{parentID},
+	}
+
+	return s.srv.Files.Create(driveFile).Media(f).Fields("id, name, md5Checksum, modifiedTime, size").Context(ctx).Do()
+}
+
+func (s *SyncEngineGo) UpdateFile(ctx context.Context, fileID, localPath string) (*drive.File, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	f, err := os.Open(localPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return s.srv.Files.Update(fileID, &drive.File{}).Media(f).Fields("id, name, md5Checksum, modifiedTime, size").Context(ctx).Do()
+}
+
+func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (*SyncSummary, error) {
+	if syncMode == "" {
+		syncMode = "local_master"
+	}
+
+	stored, err := s.db.GetAllFiles()
+	if err != nil {
+		return nil, err
+	}
+
+	lastSyncTimeRFC := s.db.GetMeta("last_sync_rfc3339")
+	startTime := time.Now().UTC().Format(time.RFC3339)
+
+	s.log(fmt.Sprintf("[*] Быстрое дельта-сканирование (Режим: %s)...", func() string {
+		if syncMode == "local_master" {
+			return "Локальный диск как основа (Master / Mirror)"
+		}
+		return "Двусторонняя синхронизация (Two-way)"
+	}()))
+
+	// Step 1: Scan local directory for DELTA only
+	localChanges, err := s.ScanLocalDelta(ctx, stored)
+	if err != nil {
+		return nil, err
+	}
+
+	s.log(fmt.Sprintf("    Локально просканировано: %d файлов. Изменений/новых: %d, удаленных: %d.",
+		localChanges.TotalScanned, len(localChanges.NewOrChanged), len(localChanges.Deleted)))
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	// Step 2: Query remote changes
+	var remoteFiles map[string]DriveFileMeta
+	var isDelta bool
+
+	if syncMode == "local_master" {
+		// In local_master mode, local disk is the master source of truth.
+		// If no local files changed and we have stored state:
+		if len(stored) > 0 && len(localChanges.NewOrChanged) == 0 && len(localChanges.Deleted) == 0 {
+			s.log("[✓] Все файлы на диске идентичны предыдущему состоянию. Изменений нет.")
+			s.db.SetMeta("last_sync_rfc3339", startTime)
+			return &SyncSummary{VerifiedCount: localChanges.TotalScanned}, nil
+		}
+		// If DB is empty (first run), fetch remote tree to match existing cloud files and avoid duplicate re-upload!
+		if len(stored) == 0 {
+			s.log("[*] Первичный запуск: сканирование существующей структуры Google Drive...")
+			remoteFiles, err = s.FetchRemoteTree(ctx)
+			if err != nil {
+				return nil, err
+			}
+			isDelta = false
+		} else {
+			remoteFiles = make(map[string]DriveFileMeta)
+			isDelta = true
+		}
+	} else {
+		// two_way mode
+		if len(stored) > 0 && lastSyncTimeRFC != "" {
+			remoteFiles, isDelta, err = s.FetchRemoteDelta(ctx, lastSyncTimeRFC)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			s.log("[*] Построение дерева Google Drive...")
+			remoteFiles, err = s.FetchRemoteTree(ctx)
+			if err != nil {
+				return nil, err
+			}
+			s.log(fmt.Sprintf("    Всего файлов в облаке: %d", len(remoteFiles)))
+		}
+	}
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	summary := &SyncSummary{}
+
+	// If no local changes and no remote changes -> instant completion!
+	if len(localChanges.NewOrChanged) == 0 && len(localChanges.Deleted) == 0 && len(remoteFiles) == 0 {
+		s.log("[✓] Изменений не обнаружено. Все файлы синхронизированы.")
+		s.db.SetMeta("last_sync_rfc3339", startTime)
+		return summary, nil
+	}
+
+	// If full tree was fetched (first run), handle initial comparison
+	if !isDelta && len(stored) == 0 {
+		s.log("[*] Первичное сопоставление локальных файлов с Google Drive...")
+		allPaths := make(map[string]bool)
+		for p := range localChanges.NewOrChanged {
+			allPaths[p] = true
+		}
+		for p := range remoteFiles {
+			allPaths[p] = true
+		}
+
+		for path := range allPaths {
+			if ctx.Err() != nil {
+				return summary, ctx.Err()
+			}
+			loc, hasLoc := localChanges.NewOrChanged[path]
+			rem, hasRem := remoteFiles[path]
+			localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(path))
+
+			if hasLoc && hasRem {
+				locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
+				if locMD5 != "" && rem.MD5 != "" && locMD5 == rem.MD5 {
+					_ = s.db.UpsertFile(FileState{
+						RelPath: path,
+						FileID:  rem.ID,
+						MD5:     locMD5,
+						MTime:   loc.MTime,
+						Size:    loc.Size,
+					})
+					summary.VerifiedCount++
+				} else {
+					// Upload or update to cloud
+					s.log(fmt.Sprintf("[↑] Загрузка на Google Drive: %s", path))
+					if !dryRun {
+						res, err := s.UpdateFile(ctx, rem.ID, localFullPath)
+						if err == nil {
+							_ = s.db.UpsertFile(FileState{
+								RelPath: path,
+								FileID:  rem.ID,
+								MD5:     res.Md5Checksum,
+								MTime:   loc.MTime,
+								Size:    loc.Size,
+							})
+						}
+					}
+					summary.UploadedCount++
+				}
+			} else if hasLoc && !hasRem {
+				s.log(fmt.Sprintf("[↑] Загрузка нового файла: %s", path))
+				if !dryRun {
+					parentID, err := s.EnsureRemoteFolder(ctx, pathPkg.Dir(path))
+					if err == nil {
+						fileName := pathPkg.Base(path)
+						res, err := s.UploadFile(ctx, localFullPath, parentID, fileName)
+						if err == nil {
+							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
+							_ = s.db.UpsertFile(FileState{
+								RelPath: path,
+								FileID:  res.Id,
+								MD5:     locMD5,
+								MTime:   loc.MTime,
+								Size:    loc.Size,
+							})
+						}
+					}
+				}
+				summary.UploadedCount++
+			} else if hasRem && !hasLoc {
+				if syncMode == "two_way" {
+					s.log(fmt.Sprintf("[↓] Скачивание из облака: %s", path))
+					if !dryRun {
+						if err := s.DownloadFile(ctx, rem.ID, localFullPath, rem.MD5); err == nil {
+							fi, _ := os.Stat(localFullPath)
+							_ = s.db.UpsertFile(FileState{
+								RelPath: path,
+								FileID:  rem.ID,
+								MD5:     rem.MD5,
+								MTime:   float64(fi.ModTime().Unix()),
+								Size:    fi.Size(),
+							})
+						}
+					}
+					summary.DownloadCount++
+				} else if syncMode == "local_master" {
+					s.log(fmt.Sprintf("[-] Удаление из Google Drive (отсутствует локально): %s", path))
+					if !dryRun {
+						_, _ = s.srv.Files.Update(rem.ID, &drive.File{Trashed: true}).Context(ctx).Do()
+					}
+					_ = s.db.RemoveFile(path)
+					summary.DeletedCount++
+				}
+			}
+		}
+
+		// In local_master mode, also clean up remote folders that do not exist locally
+		if syncMode == "local_master" {
+			var folderPaths []string
+			for fPath := range s.foldersMap {
+				if fPath != "" {
+					folderPaths = append(folderPaths, fPath)
+				}
+			}
+			sort.Slice(folderPaths, func(i, j int) bool {
+				return len(folderPaths[i]) > len(folderPaths[j])
+			})
+
+			for _, fPath := range folderPaths {
+				if ctx.Err() != nil {
+					return summary, ctx.Err()
+				}
+				localFolder := filepath.Join(s.localRoot, filepath.FromSlash(fPath))
+				if _, err := os.Stat(localFolder); os.IsNotExist(err) {
+					folderID := s.foldersMap[fPath]
+					if folderID != "" && folderID != s.remoteRoot {
+						s.log(fmt.Sprintf("[-] Удаление лишней папки из Google Drive: %s", fPath))
+						if !dryRun {
+							_, _ = s.srv.Files.Update(folderID, &drive.File{Trashed: true}).Context(ctx).Do()
+						}
+					}
+					delete(s.foldersMap, fPath)
+				}
+			}
+		}
+
+		s.db.SetMeta("last_sync_rfc3339", startTime)
+		return summary, nil
+	}
+
+	// ==========================================
+	// FAST DELTA PROCESSING (Повторные синхронизации)
+	// ==========================================
+
+	// 1. Process locally deleted files
+	for _, delPath := range localChanges.Deleted {
+		if ctx.Err() != nil {
+			return summary, ctx.Err()
+		}
+		st := stored[delPath]
+		s.log(fmt.Sprintf("[-] Удален локально: %s", delPath))
+		if !dryRun && st.FileID != "" {
+			_, _ = s.srv.Files.Update(st.FileID, &drive.File{Trashed: true}).Context(ctx).Do()
+		}
+		_ = s.db.RemoveFile(delPath)
+		summary.DeletedCount++
+	}
+
+	// 2. Process locally new or changed files
+	for path, loc := range localChanges.NewOrChanged {
+		if ctx.Err() != nil {
+			return summary, ctx.Err()
+		}
+		localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(path))
+		st, inDB := stored[path]
+
+		if inDB && st.FileID != "" {
+			// File exists in DB -> update it on Google Drive
+			s.log(fmt.Sprintf("[↑] Загрузка обновлений: %s", path))
+			if !dryRun {
+				res, err := s.UpdateFile(ctx, st.FileID, localFullPath)
+				if err == nil {
+					_ = s.db.UpsertFile(FileState{
+						RelPath: path,
+						FileID:  st.FileID,
+						MD5:     res.Md5Checksum,
+						MTime:   loc.MTime,
+						Size:    loc.Size,
+					})
+				}
+			}
+			summary.UploadedCount++
+		} else {
+			// New file
+			s.log(fmt.Sprintf("[↑] Загрузка нового файла: %s", path))
+			if !dryRun {
+				parentID, err := s.EnsureRemoteFolder(ctx, pathPkg.Dir(path))
+				if err == nil {
+					fileName := pathPkg.Base(path)
+					// Check if file already exists in cloud under parentID (to avoid duplicate files)
+					escapedFile := strings.ReplaceAll(fileName, "\\", "\\\\")
+					escapedFile = strings.ReplaceAll(escapedFile, "'", "\\'")
+					qFile := fmt.Sprintf("'%s' in parents and name = '%s' and trashed = false", parentID, escapedFile)
+					listRes, errList := s.srv.Files.List().Q(qFile).Spaces("drive").Fields("files(id, md5Checksum)").PageSize(1).Context(ctx).Do()
+					if errList == nil && len(listRes.Files) > 0 {
+						// Existing file in cloud -> update or register it!
+						existID := listRes.Files[0].Id
+						locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
+						if listRes.Files[0].Md5Checksum == locMD5 && locMD5 != "" {
+							_ = s.db.UpsertFile(FileState{
+								RelPath: path,
+								FileID:  existID,
+								MD5:     locMD5,
+								MTime:   loc.MTime,
+								Size:    loc.Size,
+							})
+						} else {
+							res, err := s.UpdateFile(ctx, existID, localFullPath)
+							if err == nil {
+								_ = s.db.UpsertFile(FileState{
+									RelPath: path,
+									FileID:  existID,
+									MD5:     res.Md5Checksum,
+									MTime:   loc.MTime,
+									Size:    loc.Size,
+								})
+							}
+						}
+					} else {
+						// New upload
+						res, err := s.UploadFile(ctx, localFullPath, parentID, fileName)
+						if err == nil {
+							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
+							_ = s.db.UpsertFile(FileState{
+								RelPath: path,
+								FileID:  res.Id,
+								MD5:     locMD5,
+								MTime:   loc.MTime,
+								Size:    loc.Size,
+							})
+						}
+					}
+				}
+			}
+			summary.UploadedCount++
+		}
+	}
+
+	// 3. Process remote delta (files changed in cloud) if in two_way mode
+	if syncMode == "two_way" && len(remoteFiles) > 0 {
+		for relName, rem := range remoteFiles {
+			if ctx.Err() != nil {
+				return summary, ctx.Err()
+			}
+			localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(relName))
+			s.log(fmt.Sprintf("[↓] Скачивание обновлений из Google Диска: %s", relName))
+			if !dryRun {
+				if err := s.DownloadFile(ctx, rem.ID, localFullPath, rem.MD5); err == nil {
+					fi, _ := os.Stat(localFullPath)
+					_ = s.db.UpsertFile(FileState{
+						RelPath: relName,
+						FileID:  rem.ID,
+						MD5:     rem.MD5,
+						MTime:   float64(fi.ModTime().Unix()),
+						Size:    fi.Size(),
+					})
+				}
+			}
+			summary.DownloadCount++
+		}
+	}
+
+	s.db.SetMeta("last_sync_rfc3339", startTime)
+	return summary, nil
+}
+
+func (s *SyncEngineGo) VerifyIntegrity(ctx context.Context) (int, int, []string, error) {
+	stored, _ := s.db.GetAllFiles()
+	localChanges, err := s.ScanLocalDelta(ctx, stored)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	remoteFiles, err := s.FetchRemoteTree(ctx)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+
+	matched := 0
+	mismatched := 0
+	var errorsList []string
+
+	for path, rem := range remoteFiles {
+		if ctx.Err() != nil {
+			return matched, mismatched, errorsList, ctx.Err()
+		}
+
+		st, inDB := stored[path]
+		localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(path))
+		fi, err := os.Stat(localFullPath)
+		if err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("Отсутствует локально: %s", path))
+			mismatched++
+			continue
+		}
+
+		if rem.MD5 == "" {
+			continue // Native Google docs
+		}
+
+		locMD5 := ""
+		if inDB && st.Size == fi.Size() && st.MTime == float64(fi.ModTime().Unix()) && st.MD5 != "" {
+			locMD5 = st.MD5
+		} else {
+			locMD5, _ = ComputeMD5(localFullPath)
+		}
+
+		if locMD5 == rem.MD5 {
+			matched++
+		} else {
+			mismatched++
+			errorsList = append(errorsList, fmt.Sprintf("Несовпадение хеша: %s (локальный: %s, облако: %s)", path, locMD5, rem.MD5))
+		}
+	}
+
+	_ = localChanges
+	return matched, mismatched, errorsList, nil
+}
