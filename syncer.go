@@ -68,8 +68,27 @@ type LocalChanges struct {
 // ScanLocalDelta quickly scans the local directory, comparing size + mtime with DB on-the-fly.
 // Unchanged files are NOT added to the processing queue.
 func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]FileState) (*LocalChanges, error) {
-	if err := os.MkdirAll(s.localRoot, 0755); err != nil {
-		return nil, err
+	// Pre-flight safety check: ensure the local directory / drive exists and is accessible
+	st, err := os.Stat(s.localRoot)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("локальная папка не найдена или диск отключен: '%s'", s.localRoot)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ошибка доступа к локальному диску/папке '%s': %w", s.localRoot, err)
+	}
+	if !st.IsDir() {
+		return nil, fmt.Errorf("указанный путь '%s' не является папкой", s.localRoot)
+	}
+
+	// Verify the folder can actually be read
+	entries, err := os.ReadDir(s.localRoot)
+	if err != nil {
+		return nil, fmt.Errorf("не удалось прочитать содержимое папки '%s' (диск отключен или заблокирован): %w", s.localRoot, err)
+	}
+
+	// If database already contains many files, but the root folder is completely empty, trigger safety abort!
+	if len(stored) > 10 && len(entries) == 0 {
+		return nil, fmt.Errorf("КРИТИЧЕСКАЯ ЗАЩИТА: Папка '%s' пуста, хотя в базе числится %d файлов! Диск может быть отключен. Синхронизация заблокирована во избежание удаления данных из облака.", s.localRoot, len(stored))
 	}
 
 	seenPaths := make(map[string]bool)
@@ -80,8 +99,12 @@ func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]Fil
 	count := 0
 	lastReport := time.Now()
 
-	err := filepath.Walk(s.localRoot, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(s.localRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if path == s.localRoot {
+				return fmt.Errorf("ошибка доступа к корневой папке '%s': %w", s.localRoot, err)
+			}
+			s.log(fmt.Sprintf("[!] Пропуск недоступного файла/папки: %s (%v)", path, err))
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -655,6 +678,10 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 					}
 					summary.DownloadCount++
 				} else if syncMode == "local_master" {
+					// Safety Tripwire: Never delete from Google Drive if localRoot is unreadable or missing
+					if fi, err := os.Stat(s.localRoot); err != nil || !fi.IsDir() {
+						return summary, fmt.Errorf("удаление заблокировано: локальный диск недоступен (%s)", s.localRoot)
+					}
 					s.log(fmt.Sprintf("[-] Удаление из Google Drive (отсутствует локально): %s", path))
 					if !dryRun {
 						_, _ = s.srv.Files.Update(rem.ID, &drive.File{Trashed: true}).Context(ctx).Do()
@@ -667,6 +694,10 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 
 		// In local_master mode, also clean up remote folders that do not exist locally
 		if syncMode == "local_master" {
+			// Safety Tripwire: Never delete folders if localRoot is unreadable or missing
+			if fi, err := os.Stat(s.localRoot); err != nil || !fi.IsDir() {
+				return summary, fmt.Errorf("удаление папок заблокировано: локальный диск недоступен (%s)", s.localRoot)
+			}
 			var folderPaths []string
 			for fPath := range s.foldersMap {
 				if fPath != "" {
@@ -704,6 +735,12 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 	// ==========================================
 
 	// 1. Process locally deleted files
+	if len(localChanges.Deleted) > 0 {
+		// Safety Tripwire: Never delete if localRoot is unreadable or missing
+		if fi, err := os.Stat(s.localRoot); err != nil || !fi.IsDir() {
+			return summary, fmt.Errorf("удаление заблокировано: локальный диск недоступен (%s)", s.localRoot)
+		}
+	}
 	for _, delPath := range localChanges.Deleted {
 		if ctx.Err() != nil {
 			return summary, ctx.Err()

@@ -610,6 +610,9 @@
             <button class="btn" onclick="triggerVerify()">
               <span>🛡</span> Самопроверка (MD5)
             </button>
+            <button class="btn" style="border-color: #d97706; color: #f59e0b;" onclick="triggerRestoreTrash()" title="Восстановить все ошибочно удаленные файлы и папки из Корзины Google Диска">
+              <span>♻️</span> Восстановить из Корзины
+            </button>
             <button class="btn" onclick="openLocalExplorer()">
               <span>📂</span> Открыть в Проводнике
             </button>
@@ -1026,6 +1029,15 @@
     async function triggerVerify() {
       appendLog('[*] Запуск самопроверки MD5...');
       await fetch('/api/verify', { method: 'POST' });
+      loadStatus();
+    }
+
+    async function triggerRestoreTrash() {
+      if (!confirm("Восстановить все удаленные файлы и папки из Корзины Google Диска?")) {
+        return;
+      }
+      appendLog('[*] Запрос на восстановление элементов из Корзины Google Диска...');
+      await fetch('/api/restore-trash', { method: 'POST' });
       loadStatus();
     }
 

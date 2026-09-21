@@ -70,8 +70,35 @@ func (s *Server) ensureEngine(ctx context.Context) error {
 }
 
 func main() {
+	restoreOnly := flag.Bool("restore", false, "Restore all files and folders from Google Drive trash")
 	minimized := flag.Bool("minimized", false, "Start minimized in tray")
 	flag.Parse()
+
+	if *restoreOnly {
+		ctx := context.Background()
+		srv, err := GetDriveService(ctx)
+		if err != nil {
+			fmt.Printf("[!] Auth error: %v\n", err)
+			return
+		}
+		restored, errs, err := RestoreAllTrashedFiles(ctx, srv, func(msg string) {
+			fmt.Println(msg)
+		})
+		if err != nil {
+			fmt.Printf("[!] Restore error: %v\n", err)
+			return
+		}
+		fmt.Printf("[✓] Готово! Восстановлено: %d, ошибок: %d\n", restored, errs)
+		return
+	}
+
+	// Single instance enforcement: allow only ONE copy of GoogleSyncLite to run
+	singleLock, isOnlyInstance := AcquireSingleInstanceLock()
+	if !isOnlyInstance {
+		fmt.Println("[!] Google Sync Lite уже запущена. Активировано существующее окно.")
+		return
+	}
+	defer ReleaseSingleInstanceLock(singleLock)
 
 	cfg := LoadConfig()
 	cfg.Autostart = IsAutostartEnabled()
@@ -275,6 +302,47 @@ func main() {
 			} else {
 				srvApp.broadcast("[✓] Все локальные файлы 100% идентичны Google Drive.")
 			}
+		}()
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Restore Trashed Files from Google Drive
+	http.HandleFunc("/api/restore-trash", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			return
+		}
+		srvApp.syncMutex.Lock()
+		if srvApp.isSyncing {
+			srvApp.syncMutex.Unlock()
+			srvApp.broadcast("[*] Процесс синхронизации уже выполняется. Дождитесь окончания.")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		srvApp.isSyncing = true
+		ctx, cancel := context.WithCancel(context.Background())
+		srvApp.syncCancel = cancel
+		srvApp.syncMutex.Unlock()
+
+		go func() {
+			defer func() {
+				srvApp.syncMutex.Lock()
+				srvApp.isSyncing = false
+				srvApp.syncCancel = nil
+				srvApp.syncMutex.Unlock()
+			}()
+
+			srvApp.broadcast("[*] Запуск восстановления удаленных файлов из Корзины Google Диска...")
+			srv, err := GetDriveService(ctx)
+			if err != nil {
+				srvApp.broadcast(fmt.Sprintf("[!] Ошибка подключения к Google Drive: %v", err))
+				return
+			}
+			restored, errs, err := RestoreAllTrashedFiles(ctx, srv, srvApp.broadcast)
+			if err != nil {
+				srvApp.broadcast(fmt.Sprintf("[!] Ошибка восстановления: %v", err))
+				return
+			}
+			srvApp.broadcast(fmt.Sprintf("[✓] Восстановление из Корзины завершено! Восстановлено: %d, Ошибок: %d", restored, errs))
 		}()
 		w.WriteHeader(http.StatusOK)
 	})
