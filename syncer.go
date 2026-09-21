@@ -58,6 +58,23 @@ func (s *SyncEngineGo) log(msg string) {
 	}
 }
 
+// IsIgnoredRelPath checks if a relative path or filename should be skipped by synchronization
+func IsIgnoredRelPath(relPath string) bool {
+	clean := filepath.ToSlash(relPath)
+	parts := strings.Split(clean, "/")
+	for _, part := range parts {
+		if strings.HasPrefix(part, ".") ||
+			strings.HasSuffix(part, ".tmp") ||
+			strings.HasPrefix(part, "~$") ||
+			part == "__pycache__" ||
+			part == "$RECYCLE.BIN" ||
+			part == "System Volume Information" {
+			return true
+		}
+	}
+	return false
+}
+
 // LocalChanges tracks only what changed locally compared to database
 type LocalChanges struct {
 	NewOrChanged map[string]FileState
@@ -93,11 +110,17 @@ func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]Fil
 
 	// Canary / Anchor file check: verify drive and folder identity
 	anchorPath := filepath.Join(s.localRoot, ".google_sync_anchor")
-	if _, err := os.Stat(anchorPath); os.IsNotExist(err) {
+	const expectedAnchor = "google-sync-lite-anchor-verified\n"
+	anchorBytes, err := os.ReadFile(anchorPath)
+	if os.IsNotExist(err) {
 		if len(stored) > 10 {
 			return nil, fmt.Errorf("КРИТИЧЕСКАЯ ЗАЩИТА: Файл привязки диска (.google_sync_anchor) не найден в '%s'! Диск отключен или сменилась буква. Проверьте накопитель!", s.localRoot)
 		}
-		_ = os.WriteFile(anchorPath, []byte("google-sync-lite-anchor-verified\n"), 0644)
+		_ = os.WriteFile(anchorPath, []byte(expectedAnchor), 0644)
+	} else if err == nil {
+		if strings.TrimSpace(string(anchorBytes)) != strings.TrimSpace(expectedAnchor) {
+			return nil, fmt.Errorf("КРИТИЧЕСКАЯ ЗАЩИТА: Поврежден или подменен идентификатор папки привязки (.google_sync_anchor) в '%s'! Проверьте правильность выбранного диска.", s.localRoot)
+		}
 	}
 
 	seenPaths := make(map[string]bool)
@@ -128,16 +151,16 @@ func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]Fil
 			return nil
 		}
 
-		name := info.Name()
-		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".tmp") {
-			return nil
-		}
-
 		rel, err := filepath.Rel(s.localRoot, path)
 		if err != nil {
 			return nil
 		}
 		cleanRel := filepath.ToSlash(rel)
+
+		if IsIgnoredRelPath(cleanRel) {
+			return nil
+		}
+
 		seenPaths[cleanRel] = true
 
 		fileMTime := float64(info.ModTime().Unix())
@@ -174,8 +197,11 @@ func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]Fil
 		return nil, err
 	}
 
-	// Check for files deleted locally that exist in DB
+	// Check for files deleted locally that exist in DB, skipping ignored/temporary patterns
 	for p := range stored {
+		if IsIgnoredRelPath(p) {
+			continue
+		}
 		if !seenPaths[p] {
 			changes.Deleted = append(changes.Deleted, p)
 		}
@@ -369,14 +395,39 @@ func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 str
 			return tree, false, err
 		}
 
+		// Invert foldersMap (folderID -> relPath) to resolve parent directory paths
+		idToRelFolder := make(map[string]string)
+		for fRel, fID := range s.foldersMap {
+			idToRelFolder[fID] = fRel
+		}
+
 		for _, f := range r.Files {
 			if f.MimeType != "application/vnd.google-apps.folder" {
-				filesMap[f.Name] = DriveFileMeta{
+				pID := ""
+				if len(f.Parents) > 0 {
+					pID = f.Parents[0]
+				}
+
+				// Resolve relative path for this file
+				relPath := f.Name
+				if pID != "" && pID != s.remoteRoot && pID != "root" {
+					if parentRel, ok := idToRelFolder[pID]; ok && parentRel != "" {
+						relPath = parentRel + "/" + f.Name
+					} else {
+						// Folder hierarchy for this file is not known; fallback to full FetchRemoteTree to ensure correctness
+						s.log(fmt.Sprintf("[*] Обнаружен файл в новом подкаталоге Google Drive (%s), обновление полного дерева...", f.Name))
+						tree, err := s.FetchRemoteTree(ctx)
+						return tree, false, err
+					}
+				}
+
+				filesMap[relPath] = DriveFileMeta{
 					ID:           f.Id,
 					Name:         f.Name,
 					Size:         f.Size,
 					MD5:          f.Md5Checksum,
 					ModifiedTime: f.ModifiedTime,
+					ParentID:     pID,
 					IsDir:        false,
 				}
 			}
@@ -447,17 +498,67 @@ func (s *SyncEngineGo) EnsureRemoteFolder(ctx context.Context, relDir string) (s
 	return parentID, nil
 }
 
-// SanitizeWindowsPath cleans illegal Windows filename characters while preserving drive root (e.g. E:\)
+// SanitizeWindowsPath cleans illegal Windows filename characters, reserved device names,
+// control characters, and trailing dots/spaces while preserving drive root (e.g. E:\)
 func SanitizeWindowsPath(fullPath string) string {
 	volume := filepath.VolumeName(fullPath)
 	rest := fullPath[len(volume):]
 
-	// Illegal chars on Windows: < > : " | ? *
-	invalidChars := []string{"<", ">", ":", "\"", "|", "?", "*"}
-	for _, c := range invalidChars {
-		rest = strings.ReplaceAll(rest, c, "_")
+	// Normalize slashes for processing
+	isSlash := strings.Contains(rest, "/")
+	var sep string
+	if isSlash {
+		sep = "/"
+	} else {
+		sep = string(filepath.Separator)
 	}
-	return volume + rest
+
+	parts := strings.Split(rest, sep)
+	reservedNames := map[string]bool{
+		"CON": true, "PRN": true, "AUX": true, "NUL": true,
+		"COM1": true, "COM2": true, "COM3": true, "COM4": true,
+		"COM5": true, "COM6": true, "COM7": true, "COM8": true, "COM9": true,
+		"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true,
+		"LPT5": true, "LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+	}
+
+	for i, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			continue
+		}
+
+		// Replace illegal characters: < > : " | ? * and control chars (ASCII < 32)
+		var sb strings.Builder
+		for _, r := range part {
+			if r < 32 || r == '<' || r == '>' || r == ':' || r == '"' || r == '|' || r == '?' || r == '*' {
+				sb.WriteRune('_')
+			} else {
+				sb.WriteRune(r)
+			}
+		}
+		cleaned := sb.String()
+
+		// Windows cannot end filenames or directory names with a space or dot
+		trimmed := strings.TrimRight(cleaned, " .")
+		if trimmed == "" {
+			trimmed = "_"
+		}
+
+		// Check DOS reserved names (e.g. AUX, CON, NUL, COM1, or AUX.txt)
+		baseUpper := strings.ToUpper(trimmed)
+		extIdx := strings.Index(baseUpper, ".")
+		stem := baseUpper
+		if extIdx != -1 {
+			stem = baseUpper[:extIdx]
+		}
+		if reservedNames[stem] {
+			trimmed = "_" + trimmed
+		}
+
+		parts[i] = trimmed
+	}
+
+	return volume + strings.Join(parts, sep)
 }
 
 func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, expectedMD5 string) error {
@@ -503,7 +604,7 @@ func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, 
 		}
 	}
 
-	_ = os.Remove(localDestPath)
+	// Atomically replace target file
 	return os.Rename(tmpDest, localDestPath)
 }
 
@@ -668,9 +769,12 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 				} else {
 					// Upload or update to cloud
 					s.log(fmt.Sprintf("[↑] Загрузка на Google Drive: %s", path))
+					uploadOk := false
 					if !dryRun {
 						res, err := s.UpdateFile(ctx, rem.ID, localFullPath)
-						if err == nil {
+						if err != nil {
+							s.log(fmt.Sprintf("[!] Ошибка обновления файла %s в Google Drive: %v", path, err))
+						} else {
 							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
 							if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
 								s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 загруженного файла %s не совпал с локальным!", path))
@@ -683,18 +787,28 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 								MTime:   loc.MTime,
 								Size:    loc.Size,
 							})
+							uploadOk = true
 						}
+					} else {
+						uploadOk = true
 					}
-					summary.UploadedCount++
+					if uploadOk {
+						summary.UploadedCount++
+					}
 				}
 			} else if hasLoc && !hasRem {
 				s.log(fmt.Sprintf("[↑] Загрузка нового файла: %s", path))
+				uploadOk := false
 				if !dryRun {
 					parentID, err := s.EnsureRemoteFolder(ctx, pathPkg.Dir(path))
-					if err == nil {
+					if err != nil {
+						s.log(fmt.Sprintf("[!] Ошибка создания папки для %s: %v", path, err))
+					} else {
 						fileName := pathPkg.Base(path)
 						res, err := s.UploadFile(ctx, localFullPath, parentID, fileName)
-						if err == nil {
+						if err != nil {
+							s.log(fmt.Sprintf("[!] Ошибка загрузки файла %s в Google Drive: %v", path, err))
+						} else {
 							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
 							if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
 								s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 нового файла %s не совпал с локальным! Удаляем поврежденную копию...", path))
@@ -708,15 +822,23 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 								MTime:   loc.MTime,
 								Size:    loc.Size,
 							})
+							uploadOk = true
 						}
 					}
+				} else {
+					uploadOk = true
 				}
-				summary.UploadedCount++
+				if uploadOk {
+					summary.UploadedCount++
+				}
 			} else if hasRem && !hasLoc {
 				if syncMode == "two_way" {
 					s.log(fmt.Sprintf("[↓] Скачивание из облака: %s", path))
+					dlOk := false
 					if !dryRun {
-						if err := s.DownloadFile(ctx, rem.ID, localFullPath, rem.MD5); err == nil {
+						if err := s.DownloadFile(ctx, rem.ID, localFullPath, rem.MD5); err != nil {
+							s.log(fmt.Sprintf("[!] Ошибка скачивания %s: %v", path, err))
+						} else {
 							fi, _ := os.Stat(localFullPath)
 							_ = s.db.UpsertFile(FileState{
 								RelPath: path,
@@ -725,9 +847,14 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 								MTime:   float64(fi.ModTime().Unix()),
 								Size:    fi.Size(),
 							})
+							dlOk = true
 						}
+					} else {
+						dlOk = true
 					}
-					summary.DownloadCount++
+					if dlOk {
+						summary.DownloadCount++
+					}
 				} else if syncMode == "local_master" {
 					if !cfg.AllowRemoteDeletion {
 						s.log(fmt.Sprintf("[🛡 Щит Безопасности] Файл отсутствует локально, но защищен от удаления: %s", path))
@@ -831,9 +958,12 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 		if inDB && st.FileID != "" {
 			// File exists in DB -> update it on Google Drive
 			s.log(fmt.Sprintf("[↑] Загрузка обновлений: %s", path))
+			uploadOk := false
 			if !dryRun {
 				res, err := s.UpdateFile(ctx, st.FileID, localFullPath)
-				if err == nil {
+				if err != nil {
+					s.log(fmt.Sprintf("[!] Ошибка обновления файла %s в Google Drive: %v", path, err))
+				} else {
 					locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
 					if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
 						s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с облачным!", path))
@@ -846,15 +976,23 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 						MTime:   loc.MTime,
 						Size:    loc.Size,
 					})
+					uploadOk = true
 				}
+			} else {
+				uploadOk = true
 			}
-			summary.UploadedCount++
+			if uploadOk {
+				summary.UploadedCount++
+			}
 		} else {
 			// New file
 			s.log(fmt.Sprintf("[↑] Загрузка нового файла: %s", path))
+			uploadOk := false
 			if !dryRun {
 				parentID, err := s.EnsureRemoteFolder(ctx, pathPkg.Dir(path))
-				if err == nil {
+				if err != nil {
+					s.log(fmt.Sprintf("[!] Ошибка создания папки для %s: %v", path, err))
+				} else {
 					fileName := pathPkg.Base(path)
 					// Check if file already exists in cloud under parentID (to avoid duplicate files)
 					escapedFile := strings.ReplaceAll(fileName, "\\", "\\\\")
@@ -873,9 +1011,12 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 								MTime:   loc.MTime,
 								Size:    loc.Size,
 							})
+							uploadOk = true
 						} else {
 							res, err := s.UpdateFile(ctx, existID, localFullPath)
-							if err == nil {
+							if err != nil {
+								s.log(fmt.Sprintf("[!] Ошибка обновления существующего файла %s в Google Drive: %v", path, err))
+							} else {
 								if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
 									s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с облачным!", path))
 									continue
@@ -887,12 +1028,15 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 									MTime:   loc.MTime,
 									Size:    loc.Size,
 								})
+								uploadOk = true
 							}
 						}
 					} else {
 						// New upload
 						res, err := s.UploadFile(ctx, localFullPath, parentID, fileName)
-						if err == nil {
+						if err != nil {
+							s.log(fmt.Sprintf("[!] Ошибка загрузки нового файла %s в Google Drive: %v", path, err))
+						} else {
 							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
 							if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
 								s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с локальным! Удаляем поврежденную копию...", path))
@@ -906,11 +1050,16 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 								MTime:   loc.MTime,
 								Size:    loc.Size,
 							})
+							uploadOk = true
 						}
 					}
 				}
+			} else {
+				uploadOk = true
 			}
-			summary.UploadedCount++
+			if uploadOk {
+				summary.UploadedCount++
+			}
 		}
 	}
 
@@ -920,10 +1069,38 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 			if ctx.Err() != nil {
 				return summary, ctx.Err()
 			}
+
+			// If file was just uploaded in this sync session, skip re-downloading it
+			if _, wasLocallyUploaded := localChanges.NewOrChanged[relName]; wasLocallyUploaded {
+				continue
+			}
+
 			localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(relName))
+
+			// Check if local file exists and already has identical MD5
+			if rem.MD5 != "" {
+				if fi, err := os.Stat(localFullPath); err == nil && !fi.IsDir() {
+					locMD5, _ := ComputeMD5(localFullPath)
+					if locMD5 == rem.MD5 {
+						_ = s.db.UpsertFile(FileState{
+							RelPath: relName,
+							FileID:  rem.ID,
+							MD5:     rem.MD5,
+							MTime:   float64(fi.ModTime().Unix()),
+							Size:    fi.Size(),
+						})
+						summary.VerifiedCount++
+						continue
+					}
+				}
+			}
+
 			s.log(fmt.Sprintf("[↓] Скачивание обновлений из Google Диска: %s", relName))
+			dlOk := false
 			if !dryRun {
-				if err := s.DownloadFile(ctx, rem.ID, localFullPath, rem.MD5); err == nil {
+				if err := s.DownloadFile(ctx, rem.ID, localFullPath, rem.MD5); err != nil {
+					s.log(fmt.Sprintf("[!] Ошибка скачивания %s: %v", relName, err))
+				} else {
 					fi, _ := os.Stat(localFullPath)
 					_ = s.db.UpsertFile(FileState{
 						RelPath: relName,
@@ -932,9 +1109,14 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 						MTime:   float64(fi.ModTime().Unix()),
 						Size:    fi.Size(),
 					})
+					dlOk = true
 				}
+			} else {
+				dlOk = true
 			}
-			summary.DownloadCount++
+			if dlOk {
+				summary.DownloadCount++
+			}
 		}
 	}
 

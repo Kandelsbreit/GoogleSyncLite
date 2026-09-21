@@ -83,4 +83,20 @@ func TestSanitizeWindowsPath(t *testing.T) {
 	if actual != expected {
 		t.Fatalf("expected '%s', got '%s'", expected, actual)
 	}
+
+	// Reserved DOS name check
+	resInput := `E:\SyncFolder\sub\aux.txt`
+	resExpected := `E:\SyncFolder\sub\_aux.txt`
+	resActual := SanitizeWindowsPath(resInput)
+	if resActual != resExpected {
+		t.Fatalf("expected '%s', got '%s'", resExpected, resActual)
+	}
+
+	// Trailing dots and spaces check
+	trailInput := `E:\SyncFolder\trail. .\file.txt. `
+	trailExpected := `E:\SyncFolder\trail\file.txt`
+	trailActual := SanitizeWindowsPath(trailInput)
+	if trailActual != trailExpected {
+		t.Fatalf("expected '%s', got '%s'", trailExpected, trailActual)
+	}
 }

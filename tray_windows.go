@@ -12,49 +12,49 @@ import (
 )
 
 var (
-	modshell32 = windows.NewLazySystemDLL("shell32.dll")
+	modshell32  = windows.NewLazySystemDLL("shell32.dll")
 	moduser32   = windows.NewLazySystemDLL("user32.dll")
 	modkernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
-	procShellNotifyIconW   = modshell32.NewProc("Shell_NotifyIconW")
-	procCreatePopupMenu    = moduser32.NewProc("CreatePopupMenu")
-	procAppendMenuW        = moduser32.NewProc("AppendMenuW")
-	procTrackPopupMenu     = moduser32.NewProc("TrackPopupMenu")
-	procDestroyMenu        = moduser32.NewProc("DestroyMenu")
-	procGetCursorPos       = moduser32.NewProc("GetCursorPos")
+	procShellNotifyIconW    = modshell32.NewProc("Shell_NotifyIconW")
+	procCreatePopupMenu     = moduser32.NewProc("CreatePopupMenu")
+	procAppendMenuW         = moduser32.NewProc("AppendMenuW")
+	procTrackPopupMenu      = moduser32.NewProc("TrackPopupMenu")
+	procDestroyMenu         = moduser32.NewProc("DestroyMenu")
+	procGetCursorPos        = moduser32.NewProc("GetCursorPos")
 	procSetForegroundWindow = moduser32.NewProc("SetForegroundWindow")
-	procRegisterClassExW   = moduser32.NewProc("RegisterClassExW")
-	procCreateWindowExW    = moduser32.NewProc("CreateWindowExW")
-	procDefWindowProcW     = moduser32.NewProc("DefWindowProcW")
-	procGetMessageW        = moduser32.NewProc("GetMessageW")
-	procTranslateMessage   = moduser32.NewProc("TranslateMessage")
-	procDispatchMessageW   = moduser32.NewProc("DispatchMessageW")
-	procPostQuitMessage    = moduser32.NewProc("PostQuitMessage")
-	procDestroyWindow      = moduser32.NewProc("DestroyWindow")
-	procPostMessageW       = moduser32.NewProc("PostMessageW")
-	procLoadImageW         = moduser32.NewProc("LoadImageW")
-	procGetModuleHandleW   = modkernel32.NewProc("GetModuleHandleW")
+	procRegisterClassExW    = moduser32.NewProc("RegisterClassExW")
+	procCreateWindowExW     = moduser32.NewProc("CreateWindowExW")
+	procDefWindowProcW      = moduser32.NewProc("DefWindowProcW")
+	procGetMessageW         = moduser32.NewProc("GetMessageW")
+	procTranslateMessage    = moduser32.NewProc("TranslateMessage")
+	procDispatchMessageW    = moduser32.NewProc("DispatchMessageW")
+	procPostQuitMessage     = moduser32.NewProc("PostQuitMessage")
+	procDestroyWindow       = moduser32.NewProc("DestroyWindow")
+	procPostMessageW        = moduser32.NewProc("PostMessageW")
+	procLoadImageW          = moduser32.NewProc("LoadImageW")
+	procGetModuleHandleW    = modkernel32.NewProc("GetModuleHandleW")
 )
 
 const (
-	NIM_ADD        = 0x00000000
-	NIM_MODIFY     = 0x00000001
-	NIM_DELETE     = 0x00000002
-	NIF_MESSAGE    = 0x00000001
-	NIF_ICON       = 0x00000002
-	NIF_TIP        = 0x00000004
+	NIM_ADD     = 0x00000000
+	NIM_MODIFY  = 0x00000001
+	NIM_DELETE  = 0x00000002
+	NIF_MESSAGE = 0x00000001
+	NIF_ICON    = 0x00000002
+	NIF_TIP     = 0x00000004
 
-	WM_APP         = 0x8000
-	WM_TRAY_MSG    = WM_APP + 100
-	WM_COMMAND     = 0x0111
-	WM_LBUTTONUP   = 0x0202
+	WM_APP           = 0x8000
+	WM_TRAY_MSG      = WM_APP + 100
+	WM_COMMAND       = 0x0111
+	WM_LBUTTONUP     = 0x0202
 	WM_LBUTTONDBLCLK = 0x0203
-	WM_RBUTTONUP   = 0x0205
+	WM_RBUTTONUP     = 0x0205
 
-	MF_STRING      = 0x00000000
-	MF_SEPARATOR   = 0x00000800
-	MF_GRAYED      = 0x00000001
-	MF_DISABLED    = 0x00000002
+	MF_STRING    = 0x00000000
+	MF_SEPARATOR = 0x00000800
+	MF_GRAYED    = 0x00000001
+	MF_DISABLED  = 0x00000002
 
 	TPM_BOTTOMALIGN = 0x0020
 	TPM_LEFTALIGN   = 0x0000
@@ -63,11 +63,11 @@ const (
 	LR_DEFAULTSIZE = 0x0040
 	LR_SHARED      = 0x8000
 
-	IDM_TITLE      = 1000
-	IDM_OPEN       = 1001
-	IDM_SYNC       = 1002
-	IDM_STOP       = 1003
-	IDM_QUIT       = 1004
+	IDM_TITLE = 1000
+	IDM_OPEN  = 1001
+	IDM_SYNC  = 1002
+	IDM_STOP  = 1003
+	IDM_QUIT  = 1004
 )
 
 type NOTIFYICONDATAW struct {

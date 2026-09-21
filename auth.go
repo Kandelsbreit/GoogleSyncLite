@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,8 +103,22 @@ func AuthenticateViaBrowser() (*oauth2.Token, error) {
 	codeChan := make(chan string)
 	errChan := make(chan error)
 
+	// Generate cryptographically secure state token to prevent CSRF / code injection
+	stateBytes := make([]byte, 24)
+	if _, err := rand.Read(stateBytes); err != nil {
+		return nil, fmt.Errorf("ошибка генерации state токена: %w", err)
+	}
+	expectedState := hex.EncodeToString(stateBytes)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {
+		incomingState := r.URL.Query().Get("state")
+		if incomingState != expectedState {
+			http.Error(w, "Недопустимый токен состояния (CSRF protection)", http.StatusForbidden)
+			errChan <- errors.New("invalid oauth state token (possible CSRF attack)")
+			return
+		}
+
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			http.Error(w, "Код авторизации не получен", http.StatusBadRequest)
@@ -130,7 +146,7 @@ func AuthenticateViaBrowser() (*oauth2.Token, error) {
 		_ = server.Serve(listener)
 	}()
 
-	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+	authURL := config.AuthCodeURL(expectedState, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 	_ = OpenBrowser(authURL)
 
 	select {

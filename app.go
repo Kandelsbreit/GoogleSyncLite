@@ -77,22 +77,22 @@ func (a *App) broadcast(msg string) {
 	}
 }
 
-func (a *App) ensureEngine(ctx context.Context) error {
+func (a *App) ensureEngine(ctx context.Context) (*SyncEngineGo, error) {
 	a.syncMutex.Lock()
 	defer a.syncMutex.Unlock()
 
 	if a.engine != nil {
-		return nil
+		return a.engine, nil
 	}
 
 	srv, err := GetDriveService(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cfg := GetConfig()
 	a.engine = NewSyncEngineGo(srv, a.db, cfg.LocalFolder, cfg.RemoteFolderID, a.broadcast)
-	return nil
+	return a.engine, nil
 }
 
 func (a *App) GetStatus() map[string]interface{} {
@@ -131,7 +131,7 @@ func (a *App) TriggerAuth() error {
 			a.broadcast(fmt.Sprintf("[!] Ошибка авторизации: %v", err))
 		} else {
 			a.broadcast("[+] Авторизация успешна! Подключение к Google Drive установлено.")
-			_ = a.ensureEngine(context.Background())
+			_, _ = a.ensureEngine(context.Background())
 			if a.ctx != nil {
 				runtime.EventsEmit(a.ctx, "status-updated")
 			}
@@ -168,7 +168,8 @@ func (a *App) TriggerSync() error {
 			}
 		}()
 
-		if err := a.ensureEngine(ctx); err != nil {
+		engine, err := a.ensureEngine(ctx)
+		if err != nil {
 			msg := fmt.Sprintf("[!] Ошибка подключения к Google Drive: %v", err)
 			a.broadcast(msg)
 			a.syncMutex.Lock()
@@ -179,7 +180,7 @@ func (a *App) TriggerSync() error {
 
 		cfg := GetConfig()
 		a.broadcast("[*] Запуск процедуры синхронизации файлов...")
-		summary, err := a.engine.Sync(ctx, cfg.DryRun, cfg.SyncMode)
+		summary, err := engine.Sync(ctx, cfg.DryRun, cfg.SyncMode)
 
 		a.syncMutex.Lock()
 		a.lastSyncTime = time.Now().Format("15:04:05")
@@ -218,14 +219,39 @@ func (a *App) TriggerStop() error {
 }
 
 func (a *App) TriggerVerify() error {
+	a.syncMutex.Lock()
+	if a.isSyncing {
+		a.syncMutex.Unlock()
+		a.broadcast("[*] Операция уже выполняется. Дождитесь окончания текущего процесса.")
+		return nil
+	}
+	a.isSyncing = true
+	ctx, cancel := context.WithCancel(context.Background())
+	a.syncCancel = cancel
+	a.syncMutex.Unlock()
+
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "status-updated")
+	}
+
 	go func() {
-		ctx := context.Background()
-		if err := a.ensureEngine(ctx); err != nil {
+		defer func() {
+			a.syncMutex.Lock()
+			a.isSyncing = false
+			a.syncCancel = nil
+			a.syncMutex.Unlock()
+			if a.ctx != nil {
+				runtime.EventsEmit(a.ctx, "status-updated")
+			}
+		}()
+
+		engine, err := a.ensureEngine(ctx)
+		if err != nil {
 			a.broadcast(fmt.Sprintf("[!] Ошибка подключения: %v", err))
 			return
 		}
 		a.broadcast("[*] Запуск проверки контрольных сумм (MD5 audit)...")
-		matched, mismatched, errs, err := a.engine.VerifyIntegrity(ctx)
+		matched, mismatched, errs, err := engine.VerifyIntegrity(ctx)
 		if err != nil {
 			a.broadcast(fmt.Sprintf("[!] Ошибка аудита: %v", err))
 			return
@@ -321,26 +347,38 @@ func (a *App) GetDriveFolders() ([]FolderItem, error) {
 		return nil, fmt.Errorf("требуется авторизация в Google Drive")
 	}
 
-	res, err := srv.Files.List().
-		Q("mimeType = 'application/vnd.google-apps.folder' and trashed = false").
-		Fields("files(id, name, parents)").
-		PageSize(100).
-		Context(ctx).
-		Do()
-
-	if err != nil {
-		return nil, fmt.Errorf("ошибка получения папок: %v", err)
-	}
-
 	folders := []FolderItem{
 		{ID: "root", Name: "Мой Диск (Корень)"},
 	}
 
-	for _, f := range res.Files {
-		folders = append(folders, FolderItem{
-			ID:   f.Id,
-			Name: f.Name,
-		})
+	pageToken := ""
+	for {
+		call := srv.Files.List().
+			Q("mimeType = 'application/vnd.google-apps.folder' and trashed = false").
+			Fields("nextPageToken, files(id, name, parents)").
+			PageSize(100).
+			Context(ctx)
+
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+
+		res, err := call.Do()
+		if err != nil {
+			return nil, fmt.Errorf("ошибка получения папок: %v", err)
+		}
+
+		for _, f := range res.Files {
+			folders = append(folders, FolderItem{
+				ID:   f.Id,
+				Name: f.Name,
+			})
+		}
+
+		pageToken = res.NextPageToken
+		if pageToken == "" {
+			break
+		}
 	}
 
 	return folders, nil
@@ -454,9 +492,9 @@ func (a *App) backgroundTicker() {
 				runtime.EventsEmit(a.ctx, "status-updated")
 			}
 
-			if err := a.ensureEngine(ctx); err == nil {
+			if engine, err := a.ensureEngine(ctx); err == nil {
 				a.broadcast("[*] Плановая фоновая синхронизация...")
-				summary, err := a.engine.Sync(ctx, cfg.DryRun, cfg.SyncMode)
+				summary, err := engine.Sync(ctx, cfg.DryRun, cfg.SyncMode)
 				a.syncMutex.Lock()
 				a.lastSyncTime = time.Now().Format("15:04:05")
 				if err == nil && summary != nil {

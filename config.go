@@ -78,5 +78,24 @@ func SaveConfigUnsafe(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(ConfigFileName, data, 0644)
+	tmpFile := ConfigFileName + ".tmp"
+	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpFile)
+		return err
+	}
+	return os.Rename(tmpFile, ConfigFileName)
 }
