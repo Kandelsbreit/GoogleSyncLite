@@ -29,6 +29,9 @@ func OpenDatabase(path string) (*Database, error) {
 		return nil, err
 	}
 
+	// SQLite embedded single connection pool prevents WAL connection lock issues
+	db.SetMaxOpenConns(1)
+
 	_, err = db.Exec(`
 		PRAGMA journal_mode = WAL;
 		PRAGMA busy_timeout = 5000;

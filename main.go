@@ -21,6 +21,14 @@ func main() {
 	minimized := flag.Bool("minimized", false, "Start minimized in tray")
 	flag.Parse()
 
+	// Single instance enforcement: allow only ONE copy of GoogleSyncLite to run
+	singleLock, isOnlyInstance := AcquireSingleInstanceLock()
+	if !isOnlyInstance {
+		fmt.Println("[!] Google Sync Lite уже запущена. Активировано существующее окно.")
+		return
+	}
+	defer ReleaseSingleInstanceLock(singleLock)
+
 	if *restoreOnly {
 		ctx := context.Background()
 		srv, err := GetDriveService(ctx)
@@ -39,19 +47,11 @@ func main() {
 		return
 	}
 
-	// Single instance enforcement: allow only ONE copy of GoogleSyncLite to run
-	singleLock, isOnlyInstance := AcquireSingleInstanceLock()
-	if !isOnlyInstance {
-		fmt.Println("[!] Google Sync Lite уже запущена. Активировано существующее окно.")
-		return
-	}
-	defer ReleaseSingleInstanceLock(singleLock)
-
 	cfg := LoadConfig()
 	cfg.Autostart = IsAutostartEnabled()
 	_ = SaveConfig(cfg)
 
-	db, err := OpenDatabase("sync_state_go.db")
+	db, err := OpenDatabase(DatabasePath())
 	if err != nil {
 		fmt.Printf("[!] DB Error: %v\n", err)
 		return

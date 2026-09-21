@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"google.golang.org/api/drive/v3"
+	"google.golang.org/api/googleapi"
 )
 
 type DriveFileMeta struct {
@@ -38,6 +39,7 @@ type SyncEngineGo struct {
 	localRoot   string
 	remoteRoot  string
 	foldersMap  map[string]string // relPath -> remote folder ID
+	md5Cache    map[string]string // relPath -> cached MD5
 	logCallback func(string)
 }
 
@@ -48,6 +50,7 @@ func NewSyncEngineGo(srv *drive.Service, db *Database, localRoot, remoteRoot str
 		localRoot:   localRoot,
 		remoteRoot:  remoteRoot,
 		foldersMap:  make(map[string]string),
+		md5Cache:    make(map[string]string),
 		logCallback: logCb,
 	}
 }
@@ -218,11 +221,15 @@ func (s *SyncEngineGo) GetOrComputeMD5(ctx context.Context, relPath string, loc 
 	if loc.MD5 != "" {
 		return loc.MD5, nil
 	}
+	if cached, ok := s.md5Cache[relPath]; ok && cached != "" {
+		return cached, nil
+	}
 	localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(relPath))
 	hash, err := ComputeMD5(localFullPath)
 	if err != nil {
 		return "", err
 	}
+	s.md5Cache[relPath] = hash
 	return hash, nil
 }
 
@@ -316,9 +323,6 @@ func (s *SyncEngineGo) FetchRemoteTree(ctx context.Context) (map[string]DriveFil
 	}
 	var queue []queueItem
 	queue = append(queue, queueItem{id: rootID, path: ""})
-	if rootID != "root" {
-		queue = append(queue, queueItem{id: "root", path: ""})
-	}
 
 	visitedFolders := make(map[string]bool)
 
@@ -326,7 +330,7 @@ func (s *SyncEngineGo) FetchRemoteTree(ctx context.Context) (map[string]DriveFil
 		curr := queue[0]
 		queue = queue[1:]
 
-		if visitedFolders[curr.id] && curr.id != rootID && curr.id != "root" {
+		if visitedFolders[curr.id] {
 			continue
 		}
 		visitedFolders[curr.id] = true
@@ -523,14 +527,18 @@ func SanitizeWindowsPath(fullPath string) string {
 	}
 
 	for i, part := range parts {
-		if part == "" || part == "." || part == ".." {
+		if part == "" {
+			continue
+		}
+		if part == "." || part == ".." {
+			parts[i] = "_"
 			continue
 		}
 
 		// Replace illegal characters: < > : " | ? * and control chars (ASCII < 32)
 		var sb strings.Builder
 		for _, r := range part {
-			if r < 32 || r == '<' || r == '>' || r == ':' || r == '"' || r == '|' || r == '?' || r == '*' {
+			if r < 32 || r == '<' || r == '>' || r == ':' || r == '"' || r == '|' || r == '?' || r == '*' || r == '\\' {
 				sb.WriteRune('_')
 			} else {
 				sb.WriteRune(r)
@@ -565,7 +573,17 @@ func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, 
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	localDestPath = SanitizeWindowsPath(localDestPath)
+
+	cleanLocalRoot := filepath.Clean(s.localRoot)
+	cleanDestPath := filepath.Clean(SanitizeWindowsPath(localDestPath))
+
+	// Strict Path Traversal Guard: destination MUST reside within s.localRoot
+	rel, err := filepath.Rel(cleanLocalRoot, cleanDestPath)
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return fmt.Errorf("попытка выхода за пределы папки синхронизации (Path Traversal заблокирован): %s", localDestPath)
+	}
+
+	localDestPath = cleanDestPath
 	tmpDest := localDestPath + ".tmp"
 	_ = os.MkdirAll(filepath.Dir(localDestPath), 0755)
 
@@ -605,38 +623,100 @@ func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, 
 	}
 
 	// Atomically replace target file
-	return os.Rename(tmpDest, localDestPath)
+	if renameErr := os.Rename(tmpDest, localDestPath); renameErr != nil {
+		_ = os.Remove(tmpDest) // Clean orphaned .tmp on rename error
+		return renameErr
+	}
+	return nil
+}
+
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if gErr, ok := err.(*googleapi.Error); ok {
+		if gErr.Code == 429 || gErr.Code >= 500 {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *SyncEngineGo) UploadFile(ctx context.Context, localPath, parentID, remoteName string) (*drive.File, error) {
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	f, err := os.Open(localPath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
 
-	driveFile := &drive.File{
-		Name:    remoteName,
-		Parents: []string{parentID},
-	}
+	var res *drive.File
+	var lastErr error
 
-	return s.srv.Files.Create(driveFile).Media(f).Fields("id, name, md5Checksum, modifiedTime, size").Context(ctx).Do()
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<attempt) * 500 * time.Millisecond
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		f, err := os.Open(localPath)
+		if err != nil {
+			return nil, err
+		}
+
+		driveFile := &drive.File{
+			Name:    remoteName,
+			Parents: []string{parentID},
+		}
+
+		res, lastErr = s.srv.Files.Create(driveFile).Media(f).Fields("id, name, md5Checksum, modifiedTime, size").Context(ctx).Do()
+		f.Close()
+
+		if lastErr == nil {
+			return res, nil
+		}
+		if !isRetryableError(lastErr) {
+			break
+		}
+	}
+	return nil, lastErr
 }
 
 func (s *SyncEngineGo) UpdateFile(ctx context.Context, fileID, localPath string) (*drive.File, error) {
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	f, err := os.Open(localPath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
 
-	return s.srv.Files.Update(fileID, &drive.File{}).Media(f).Fields("id, name, md5Checksum, modifiedTime, size").Context(ctx).Do()
+	var res *drive.File
+	var lastErr error
+
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<attempt) * 500 * time.Millisecond
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		f, err := os.Open(localPath)
+		if err != nil {
+			return nil, err
+		}
+
+		res, lastErr = s.srv.Files.Update(fileID, &drive.File{}).Media(f).Fields("id, name, md5Checksum, modifiedTime, size").Context(ctx).Do()
+		f.Close()
+
+		if lastErr == nil {
+			return res, nil
+		}
+		if !isRetryableError(lastErr) {
+			break
+		}
+	}
+	return nil, lastErr
 }
 
 func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (*SyncSummary, error) {
@@ -745,6 +825,21 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 		}
 		for p := range remoteFiles {
 			allPaths[p] = true
+		}
+
+		// Pre-flight check: in local_master with deletion enabled, calculate total pending deletions
+		if syncMode == "local_master" && cfg.AllowRemoteDeletion {
+			missingRemoteFilesCount := 0
+			for p := range remoteFiles {
+				if _, hasLoc := localChanges.NewOrChanged[p]; !hasLoc {
+					missingRemoteFilesCount++
+				}
+			}
+
+			// Blast Radius Threshold: never mass-delete cloud files on first run without safety threshold check!
+			if missingRemoteFilesCount > cfg.MaxDeleteThreshold {
+				return summary, fmt.Errorf("[🛡 Щит Безопасности] Первичный запуск: обнаружено %d файлов в Google Drive, отсутствующих локально (порог безопасности: %d). Удаление отменено для защиты ваших данных! Отключите удаление или увеличьте порог в Настройках, если это намеренное действие.", missingRemoteFilesCount, cfg.MaxDeleteThreshold)
+			}
 		}
 
 		for path := range allPaths {
@@ -962,7 +1057,31 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 			if !dryRun {
 				res, err := s.UpdateFile(ctx, st.FileID, localFullPath)
 				if err != nil {
-					s.log(fmt.Sprintf("[!] Ошибка обновления файла %s в Google Drive: %v", path, err))
+					// Self-healing: if file in cloud was deleted/missing (404), clear stale FileID and upload fresh
+					if gErr, ok := err.(*googleapi.Error); ok && gErr.Code == 404 {
+						s.log(fmt.Sprintf("[*] Файл %s отсутствует в облаке (404 Not Found). Сброс ID и повторная загрузка...", path))
+						_ = s.db.RemoveFile(path)
+						parentID, pErr := s.EnsureRemoteFolder(ctx, pathPkg.Dir(path))
+						if pErr == nil {
+							fileName := pathPkg.Base(path)
+							newRes, upErr := s.UploadFile(ctx, localFullPath, parentID, fileName)
+							if upErr == nil {
+								locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
+								_ = s.db.UpsertFile(FileState{
+									RelPath: path,
+									FileID:  newRes.Id,
+									MD5:     locMD5,
+									MTime:   loc.MTime,
+									Size:    loc.Size,
+								})
+								uploadOk = true
+							} else {
+								s.log(fmt.Sprintf("[!] Ошибка повторной загрузки %s: %v", path, upErr))
+							}
+						}
+					} else {
+						s.log(fmt.Sprintf("[!] Ошибка обновления файла %s в Google Drive: %v", path, err))
+					}
 				} else {
 					locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
 					if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {

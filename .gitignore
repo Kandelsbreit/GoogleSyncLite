@@ -6,6 +6,8 @@ config.json
 # Databases and state
 *.db
 *.sqlite
+*.db-wal
+*.db-shm
 sync_state_go.db
 
 # Logs and temporary files
@@ -22,6 +24,8 @@ dist/
 rsrc.syso
 rsrc.syso.bak
 googlesync
+*.bak
+.freebuff/
 
 # Python cache (legacy)
 __pycache__/

@@ -105,17 +105,36 @@ async function loadStatus() {
       authText.textContent = 'Требуется вход Google';
     }
 
-    // Config form values
+    // Config form values (do not overwrite if the user is currently typing in the field)
     if (data.config) {
       const cfg = data.config;
-      document.getElementById('dashLocalFolder').value = cfg.local_folder || '';
-      document.getElementById('dashRemoteFolder').value = cfg.remote_folder_id || 'root';
-      document.getElementById('cfgLocalFolder').value = cfg.local_folder || '';
-      document.getElementById('cfgRemoteFolder').value = cfg.remote_folder_id || 'root';
-      document.getElementById('cfgAutostart').checked = !!cfg.autostart;
-      document.getElementById('cfgInterval').value = Math.max(1, Math.floor((cfg.sync_interval_seconds || 60) / 60));
-      document.getElementById('cfgAllowRemoteDeletion').checked = !!cfg.allow_remote_deletion;
-      document.getElementById('cfgMaxDeleteThreshold').value = cfg.max_delete_threshold || 20;
+      const activeEl = document.activeElement;
+
+      const setValIfNotFocused = (id, val) => {
+        const el = document.getElementById(id);
+        if (el && el !== activeEl) {
+          el.value = val;
+        }
+      };
+
+      setValIfNotFocused('dashLocalFolder', cfg.local_folder || '');
+      setValIfNotFocused('dashRemoteFolder', cfg.remote_folder_id || 'root');
+      setValIfNotFocused('cfgLocalFolder', cfg.local_folder || '');
+      setValIfNotFocused('cfgRemoteFolder', cfg.remote_folder_id || 'root');
+
+      const elAutostart = document.getElementById('cfgAutostart');
+      if (elAutostart && elAutostart !== activeEl) {
+        elAutostart.checked = !!cfg.autostart;
+      }
+
+      setValIfNotFocused('cfgInterval', Math.max(1, Math.floor((cfg.sync_interval_seconds || 60) / 60)));
+
+      const elDel = document.getElementById('cfgAllowRemoteDeletion');
+      if (elDel && elDel !== activeEl) {
+        elDel.checked = !!cfg.allow_remote_deletion;
+      }
+
+      setValIfNotFocused('cfgMaxDeleteThreshold', cfg.max_delete_threshold || 20);
 
       if (cfg.sync_mode) {
         updateModeUI(cfg.sync_mode);

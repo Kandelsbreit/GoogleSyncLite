@@ -308,6 +308,9 @@ func (tm *TrayManager) Stop() {
 	if tm == nil || tm.hwnd == 0 {
 		return
 	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
 	procShellNotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(&tm.nid)))
 	procPostMessageW.Call(uintptr(tm.hwnd), 0x0010 /* WM_CLOSE */, 0, 0)
 }

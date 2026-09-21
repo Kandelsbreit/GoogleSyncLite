@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"sync"
 )
 
@@ -30,11 +29,10 @@ func LoadConfig() Config {
 	configLock.Lock()
 	defer configLock.Unlock()
 
-	defaultLocal := filepath.Join(".", "sync_folder")
-	absLocal, _ := filepath.Abs(defaultLocal)
+	cfgPath := ConfigPath()
 
 	appConfig = Config{
-		LocalFolder:         absLocal,
+		LocalFolder:         DefaultSyncFolderPath(),
 		RemoteFolderID:      "root",
 		SyncIntervalSeconds: 60,
 		Autostart:           false,
@@ -45,9 +43,12 @@ func LoadConfig() Config {
 		MaxDeleteThreshold:  20,
 	}
 
-	data, err := os.ReadFile(ConfigFileName)
+	data, err := os.ReadFile(cfgPath)
 	if err == nil {
-		_ = json.Unmarshal(data, &appConfig)
+		if unmarshalErr := json.Unmarshal(data, &appConfig); unmarshalErr != nil {
+			// Backup corrupted config so user settings aren't lost silently
+			_ = os.WriteFile(cfgPath+".bak", data, 0644)
+		}
 		if appConfig.SyncMode == "" {
 			appConfig.SyncMode = "local_master"
 		}
@@ -78,7 +79,8 @@ func SaveConfigUnsafe(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	tmpFile := ConfigFileName + ".tmp"
+	cfgPath := ConfigPath()
+	tmpFile := cfgPath + ".tmp"
 	f, err := os.OpenFile(tmpFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
@@ -97,5 +99,5 @@ func SaveConfigUnsafe(cfg Config) error {
 		_ = os.Remove(tmpFile)
 		return err
 	}
-	return os.Rename(tmpFile, ConfigFileName)
+	return os.Rename(tmpFile, cfgPath)
 }

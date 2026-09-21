@@ -99,4 +99,29 @@ func TestSanitizeWindowsPath(t *testing.T) {
 	if trailActual != trailExpected {
 		t.Fatalf("expected '%s', got '%s'", trailExpected, trailActual)
 	}
+
+	// Path Traversal dotdot sanitization
+	traversalInput := `E:\SyncFolder\..\..\evil.txt`
+	traversalExpected := `E:\SyncFolder\_\_\evil.txt`
+	traversalActual := SanitizeWindowsPath(traversalInput)
+	if traversalActual != traversalExpected {
+		t.Fatalf("expected '%s', got '%s'", traversalExpected, traversalActual)
+	}
+}
+
+func TestPathsAnchoring(t *testing.T) {
+	appDir := AppDir()
+	if appDir == "" {
+		t.Fatal("expected non-empty AppDir")
+	}
+
+	cfgPath := ConfigPath()
+	if !filepath.IsAbs(cfgPath) {
+		t.Fatalf("expected absolute ConfigPath, got %s", cfgPath)
+	}
+
+	dbPath := DatabasePath()
+	if !filepath.IsAbs(dbPath) {
+		t.Fatalf("expected absolute DatabasePath, got %s", dbPath)
+	}
 }

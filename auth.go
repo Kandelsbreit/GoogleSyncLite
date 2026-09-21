@@ -38,9 +38,10 @@ type ClientSecretFile struct {
 }
 
 func GetOAuthConfig() (*oauth2.Config, error) {
-	data, err := os.ReadFile(CredentialsFile)
+	credPath := CredentialsPath()
+	data, err := os.ReadFile(credPath)
 	if err != nil {
-		return nil, fmt.Errorf("файл '%s' не найден. Пожалуйста, поместите credentials.json из Google Cloud в папку программы", CredentialsFile)
+		return nil, fmt.Errorf("файл '%s' не найден. Пожалуйста, поместите credentials.json из Google Cloud в папку программы", credPath)
 	}
 
 	config, err := google.ConfigFromJSON(data, drive.DriveScope)
@@ -53,7 +54,7 @@ func GetOAuthConfig() (*oauth2.Config, error) {
 }
 
 func LoadSavedToken() (*oauth2.Token, error) {
-	f, err := os.Open(TokenFile)
+	f, err := os.Open(TokenPath())
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +66,7 @@ func LoadSavedToken() (*oauth2.Token, error) {
 }
 
 func SaveToken(tok *oauth2.Token) error {
-	f, err := os.OpenFile(TokenFile, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	f, err := os.OpenFile(TokenPath(), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
