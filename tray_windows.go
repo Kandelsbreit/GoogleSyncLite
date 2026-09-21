@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"syscall"
@@ -33,6 +34,7 @@ var (
 	procDestroyWindow       = moduser32.NewProc("DestroyWindow")
 	procPostMessageW        = moduser32.NewProc("PostMessageW")
 	procLoadImageW          = moduser32.NewProc("LoadImageW")
+	procGetSystemMetrics    = moduser32.NewProc("GetSystemMetrics")
 	procGetModuleHandleW    = modkernel32.NewProc("GetModuleHandleW")
 )
 
@@ -59,9 +61,13 @@ const (
 	TPM_BOTTOMALIGN = 0x0020
 	TPM_LEFTALIGN   = 0x0000
 
-	IMAGE_ICON     = 1
-	LR_DEFAULTSIZE = 0x0040
-	LR_SHARED      = 0x8000
+	IMAGE_ICON      = 1
+	LR_LOADFROMFILE = 0x0010
+	LR_DEFAULTSIZE  = 0x0040
+	LR_SHARED       = 0x8000
+
+	SM_CXSMICON = 49
+	SM_CYSMICON = 50
 
 	IDM_TITLE = 1000
 	IDM_OPEN  = 1001
@@ -234,16 +240,55 @@ func StartTray(onOpen, onSync, onStop, onQuit func()) (*TrayManager, error) {
 		}
 		tm.hwnd = windows.Handle(hwnd)
 
-		// Load embedded icon (resource ID 1)
-		hIcon, _, _ := procLoadImageW.Call(
-			hInst,
-			1, // resource ID 1 from rsrc.syso
-			IMAGE_ICON,
-			0, 0,
-			LR_DEFAULTSIZE|LR_SHARED,
-		)
+		// Determine tray icon dimensions (standard is 16x16 on 100% DPI, or system small icon size)
+		cxIcon, _, _ := procGetSystemMetrics.Call(SM_CXSMICON)
+		cyIcon, _, _ := procGetSystemMetrics.Call(SM_CYSMICON)
+		if cxIcon == 0 {
+			cxIcon = 16
+		}
+		if cyIcon == 0 {
+			cyIcon = 16
+		}
+
+		var hIcon uintptr
+
+		// 1. Try loading directly from app.ico in application directory
+		icoCandidates := []string{
+			filepath.Join(AppDir(), "app.ico"),
+			filepath.Join(AppDir(), "build", "windows", "icon.ico"),
+			"app.ico",
+		}
+		for _, candidate := range icoCandidates {
+			if _, err := os.Stat(candidate); err == nil {
+				icoPathUTF16, err := windows.UTF16PtrFromString(candidate)
+				if err == nil {
+					hIcon, _, _ = procLoadImageW.Call(
+						0,
+						uintptr(unsafe.Pointer(icoPathUTF16)),
+						IMAGE_ICON,
+						cxIcon, cyIcon,
+						LR_LOADFROMFILE,
+					)
+					if hIcon != 0 {
+						break
+					}
+				}
+			}
+		}
+
+		// 2. If app.ico not found or failed, try embedded icon (resource ID 1 from rsrc.syso)
 		if hIcon == 0 {
-			// Fallback to application default
+			hIcon, _, _ = procLoadImageW.Call(
+				hInst,
+				1, // resource ID 1 from rsrc.syso
+				IMAGE_ICON,
+				cxIcon, cyIcon,
+				LR_DEFAULTSIZE|LR_SHARED,
+			)
+		}
+
+		// 3. Fallback to standard application default icon
+		if hIcon == 0 {
 			hIcon, _, _ = procLoadImageW.Call(0, 32512, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE|LR_SHARED)
 		}
 
