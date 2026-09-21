@@ -75,3 +75,12 @@ func TestPathNormalization(t *testing.T) {
 		t.Fatalf("expected clean 'Cloud/Cloud/d/2N/file.c9r', got '%s'", clean)
 	}
 }
+
+func TestSanitizeWindowsPath(t *testing.T) {
+	input := `E:\SyncFolder\some:invalid*name?file"test|demo.txt`
+	expected := `E:\SyncFolder\some_invalid_name_file_test_demo.txt`
+	actual := SanitizeWindowsPath(input)
+	if actual != expected {
+		t.Fatalf("expected '%s', got '%s'", expected, actual)
+	}
+}

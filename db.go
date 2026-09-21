@@ -30,6 +30,10 @@ func OpenDatabase(path string) (*Database, error) {
 	}
 
 	_, err = db.Exec(`
+		PRAGMA journal_mode = WAL;
+		PRAGMA busy_timeout = 5000;
+		PRAGMA synchronous = NORMAL;
+
 		CREATE TABLE IF NOT EXISTS files (
 			rel_path TEXT PRIMARY KEY,
 			file_id TEXT,

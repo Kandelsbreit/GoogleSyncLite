@@ -447,10 +447,24 @@ func (s *SyncEngineGo) EnsureRemoteFolder(ctx context.Context, relDir string) (s
 	return parentID, nil
 }
 
+// SanitizeWindowsPath cleans illegal Windows filename characters while preserving drive root (e.g. E:\)
+func SanitizeWindowsPath(fullPath string) string {
+	volume := filepath.VolumeName(fullPath)
+	rest := fullPath[len(volume):]
+
+	// Illegal chars on Windows: < > : " | ? *
+	invalidChars := []string{"<", ">", ":", "\"", "|", "?", "*"}
+	for _, c := range invalidChars {
+		rest = strings.ReplaceAll(rest, c, "_")
+	}
+	return volume + rest
+}
+
 func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, expectedMD5 string) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	localDestPath = SanitizeWindowsPath(localDestPath)
 	tmpDest := localDestPath + ".tmp"
 	_ = os.MkdirAll(filepath.Dir(localDestPath), 0755)
 
@@ -465,14 +479,22 @@ func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, 
 		return err
 	}
 
-	_, err = io.Copy(out, resp.Body)
-	out.Close()
-	if err != nil {
+	_, copyErr := io.Copy(out, resp.Body)
+	if copyErr != nil {
+		out.Close()
 		os.Remove(tmpDest)
-		return err
+		return copyErr
 	}
 
-	// Verify MD5 before moving
+	// Flush OS write buffers to physical disk to prevent zero-byte corrupt files on power loss
+	if syncErr := out.Sync(); syncErr != nil {
+		out.Close()
+		os.Remove(tmpDest)
+		return syncErr
+	}
+	out.Close()
+
+	// Verify MD5 before replacing target file
 	if expectedMD5 != "" {
 		chkMD5, err := ComputeMD5(tmpDest)
 		if err == nil && chkMD5 != expectedMD5 {
@@ -649,6 +671,11 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 					if !dryRun {
 						res, err := s.UpdateFile(ctx, rem.ID, localFullPath)
 						if err == nil {
+							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
+							if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
+								s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 загруженного файла %s не совпал с локальным!", path))
+								continue
+							}
 							_ = s.db.UpsertFile(FileState{
 								RelPath: path,
 								FileID:  rem.ID,
@@ -669,6 +696,11 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 						res, err := s.UploadFile(ctx, localFullPath, parentID, fileName)
 						if err == nil {
 							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
+							if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
+								s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 нового файла %s не совпал с локальным! Удаляем поврежденную копию...", path))
+								_, _ = s.srv.Files.Update(res.Id, &drive.File{Trashed: true}).Context(ctx).Do()
+								continue
+							}
 							_ = s.db.UpsertFile(FileState{
 								RelPath: path,
 								FileID:  res.Id,
@@ -802,6 +834,11 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 			if !dryRun {
 				res, err := s.UpdateFile(ctx, st.FileID, localFullPath)
 				if err == nil {
+					locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
+					if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
+						s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с облачным!", path))
+						continue
+					}
 					_ = s.db.UpsertFile(FileState{
 						RelPath: path,
 						FileID:  st.FileID,
@@ -839,6 +876,10 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 						} else {
 							res, err := s.UpdateFile(ctx, existID, localFullPath)
 							if err == nil {
+								if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
+									s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с облачным!", path))
+									continue
+								}
 								_ = s.db.UpsertFile(FileState{
 									RelPath: path,
 									FileID:  existID,
@@ -853,6 +894,11 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 						res, err := s.UploadFile(ctx, localFullPath, parentID, fileName)
 						if err == nil {
 							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
+							if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
+								s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с локальным! Удаляем поврежденную копию...", path))
+								_, _ = s.srv.Files.Update(res.Id, &drive.File{Trashed: true}).Context(ctx).Do()
+								continue
+							}
 							_ = s.db.UpsertFile(FileState{
 								RelPath: path,
 								FileID:  res.Id,
