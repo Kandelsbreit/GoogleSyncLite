@@ -20,10 +20,11 @@ out.log
 *.exe
 dist/
 rsrc.syso
+rsrc.syso.bak
 googlesync
 
 # Python cache (legacy)
 __pycache__/
 *.pyc
-build/
+build/bin/
 *.spec

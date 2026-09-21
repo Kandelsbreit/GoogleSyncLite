@@ -1,0 +1,18 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "GoogleSyncLite",
+  "outputfilename": "GoogleSyncLite",
+  "frontend:dir": "./frontend",
+  "wailsjsdir": "./frontend",
+  "author": {
+    "name": "Kandelsbreit",
+    "email": "kandelsbreit@gmail.com"
+  },
+  "info": {
+    "companyName": "Kandelsbreit",
+    "productName": "Google Sync Lite",
+    "productVersion": "1.1.0",
+    "copyright": "Copyright 2026 Kandelsbreit",
+    "comments": "High-Performance Google Drive Synchronization with Safety Shield"
+  }
+}

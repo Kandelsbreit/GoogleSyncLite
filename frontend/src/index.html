@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google Sync Lite</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Frameless Custom Titlebar -->
+  <div class="titlebar">
+    <div class="titlebar-left">
+      <div class="titlebar-brand">
+        <div class="titlebar-icon">
+          <!-- Cloud Sync SVG Logo -->
+          <svg viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>
+            <path d="M12 13v4m0 0-2-2m2 2 2-2" stroke="#10b981"/>
+          </svg>
+        </div>
+        <span>Google Sync Lite</span>
+      </div>
+      <span class="version-tag">v1.1.0</span>
+      <div class="safety-pill">
+        <span class="safety-dot"></span>
+        <span>ЩИТ БЕЗОПАСНОСТИ: АКТИВЕН</span>
+      </div>
+    </div>
+
+    <div class="window-controls">
+      <button class="win-btn" onclick="appMinimize()" title="Свернуть в панель задач">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+          <rect y="5" width="12" height="1.5" rx="0.5"/>
+        </svg>
+      </button>
+      <button class="win-btn" onclick="appHideToTray()" title="Свернуть в системный трей">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 3v12m0 0l4-4m-4 4l-4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>
+        </svg>
+      </button>
+      <button class="win-btn close" onclick="appHideToTray()" title="Закрыть окно (свернуть в трей)">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+          <path d="M1.4 0.3L0.3 1.4L4.9 6L0.3 10.6L1.4 11.7L6 7.1L10.6 11.7L11.7 10.6L7.1 6L11.7 1.4L10.6 0.3L6 4.9L1.4 0.3Z"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="app-container">
+    <!-- Sidebar -->
+    <div class="sidebar">
+      <div class="nav-group">
+        <div class="nav-item active" id="nav-dashboard" onclick="switchTab('dashboard')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="9" rx="1"/>
+            <rect x="14" y="3" width="7" height="5" rx="1"/>
+            <rect x="14" y="12" width="7" height="9" rx="1"/>
+            <rect x="3" y="16" width="7" height="5" rx="1"/>
+          </svg>
+          <span>Обзор</span>
+        </div>
+        <div class="nav-item" id="nav-settings" onclick="switchTab('settings')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          <span>Настройки</span>
+        </div>
+        <div class="nav-item" id="nav-logs" onclick="switchTab('logs')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 17 10 11 4 5"/>
+            <line x1="12" y1="19" x2="20" y2="19"/>
+          </svg>
+          <span>Журнал</span>
+        </div>
+      </div>
+
+      <div class="sidebar-bottom">
+        <div class="auth-badge">
+          <div class="auth-dot" id="authDot"></div>
+          <span id="authStatusText">Проверка связи...</span>
+        </div>
+        <div class="sidebar-engine-tag">Zero-Loss Engine • MD5 WAL</div>
+      </div>
+    </div>
+
+    <!-- Main Content Area -->
+    <div class="content-area">
+      
+      <!-- PAGE: DASHBOARD -->
+      <div class="page active" id="page-dashboard">
+        <div class="page-header">
+          <div class="page-title">Состояние синхронизации</div>
+        </div>
+
+        <!-- Live Status Banner -->
+        <div class="status-banner" id="statusBanner">
+          <div class="status-left">
+            <div class="status-indicator-orb" id="statusOrb"></div>
+            <div class="status-info">
+              <span class="status-state-text" id="statusMainText">Готов к работе</span>
+              <span class="status-sub-text" id="statusSubText">Все файлы под защитой Disconnect Guard</span>
+            </div>
+          </div>
+          <div class="status-right" id="statusTimeText">Посл. синхронизация: —</div>
+        </div>
+
+        <!-- Action Cards Grid -->
+        <div class="card">
+          <div class="card-title">
+            <span>Быстрые действия</span>
+          </div>
+          <div class="actions-grid">
+            <button class="btn btn-primary" id="btnSync" onclick="triggerSync()">
+              <span id="btnSyncIcon">🔄</span>
+              <span id="btnSyncText">Синхронизировать</span>
+            </button>
+            <button class="btn btn-danger" id="btnStop" onclick="triggerStop()" disabled>
+              <span>⏹</span>
+              <span>Остановить</span>
+            </button>
+            <button class="btn" onclick="triggerVerify()">
+              <span>🛡️</span>
+              <span>Самопроверка MD5</span>
+            </button>
+            <button class="btn btn-warning" onclick="triggerRestoreTrash()" title="Восстановить файлы из Корзины Google Drive">
+              <span>♻️</span>
+              <span>Корзина Drive</span>
+            </button>
+            <button class="btn" onclick="openLocalExplorer()">
+              <span>📂</span>
+              <span>Проводник Windows</span>
+            </button>
+            <button class="btn" onclick="triggerAuth()">
+              <span>🔑</span>
+              <span>Вход Google Drive</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Sync Mode Radio Selector -->
+        <div class="card">
+          <div class="card-title">Режим работы</div>
+          <div class="mode-card selected" id="dashModeMaster" onclick="setSyncMode('local_master')">
+            <input type="radio" name="syncModeDash" id="dashRadioMaster" value="local_master" checked>
+            <div class="mode-details">
+              <span class="mode-title-text">Локальный диск как основа (Master / Mirror)</span>
+              <span class="mode-desc-text">ПК — главный источник правды. Новые и измененные файлы мгновенно зеркалируются в Google Drive. Изменения из облака не затирают файлы на диске. Оптимально для больших архивов (115 000+ файлов).</span>
+            </div>
+          </div>
+          <div class="mode-card" id="dashModeTwoWay" onclick="setSyncMode('two_way')">
+            <input type="radio" name="syncModeDash" id="dashRadioTwoWay" value="two_way">
+            <div class="mode-details">
+              <span class="mode-title-text">Двусторонняя синхронизация (Two-Way Sync)</span>
+              <span class="mode-desc-text">Синхронизация в обе стороны с автоматическим созданием безопасных копий при конфликтах версий.</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Synchronized Paths -->
+        <div class="card">
+          <div class="card-title">Папки синхронизации</div>
+          <div class="form-group">
+            <label class="form-label">Локальная папка на ПК:</label>
+            <div class="input-row">
+              <input type="text" id="dashLocalFolder" readonly>
+              <button class="btn btn-primary btn-sm" onclick="chooseLocalFolder()">📁 Выбрать...</button>
+              <button class="btn btn-sm" onclick="openLocalExplorer()">Проводник</button>
+            </div>
+          </div>
+          <div class="form-group" style="margin-top: 6px;">
+            <label class="form-label">Папка на Google Диске (ID):</label>
+            <div class="input-row">
+              <input type="text" id="dashRemoteFolder" readonly>
+              <button class="btn btn-primary btn-sm" onclick="openDrivePicker()">☁ Выбрать в облаке...</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Activity Stream Card -->
+        <div class="card">
+          <div class="card-title">
+            <span>Текущие события</span>
+            <span style="font-size: 12px; font-weight: normal; color: var(--accent-blue); cursor: pointer;" onclick="switchTab('logs')">Полный журнал →</span>
+          </div>
+          <div class="mini-log-box" id="dashMiniLog">Ожидание команд. Нажмите «Синхронизировать» для проверки файлов.</div>
+        </div>
+
+      </div>
+
+      <!-- PAGE: SETTINGS -->
+      <div class="page" id="page-settings">
+        <div class="page-header">
+          <div class="page-title">Настройки приложения</div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Режим синхронизации</div>
+          <div class="mode-card selected" id="cfgModeMaster" onclick="setSyncMode('local_master')">
+            <input type="radio" name="cfgSyncMode" id="cfgRadioMaster" value="local_master" checked>
+            <div class="mode-details">
+              <span class="mode-title-text">Локальный диск как основа (Master / Mirror)</span>
+              <span class="mode-desc-text">ПК — первоисточник данных. Облако зеркалирует локальный диск. Быстрое кэширование по MD5/mtime.</span>
+            </div>
+          </div>
+          <div class="mode-card" id="cfgModeTwoWay" onclick="setSyncMode('two_way')">
+            <input type="radio" name="cfgSyncMode" id="cfgRadioTwoWay" value="two_way">
+            <div class="mode-details">
+              <span class="mode-title-text">Двусторонняя синхронизация (Two-Way)</span>
+              <span class="mode-desc-text">Файлы синхронизируются в обе стороны (Локальный ПК ↔ Google Drive).</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Папки</div>
+          <div class="form-group">
+            <label class="form-label">Локальная папка на ПК</label>
+            <div class="input-row">
+              <input type="text" id="cfgLocalFolder" readonly>
+              <button class="btn btn-primary btn-sm" onclick="chooseLocalFolder()">📁 Выбрать папку...</button>
+            </div>
+          </div>
+          <div class="form-group" style="margin-top: 8px;">
+            <label class="form-label">Папка в облаке Google Drive</label>
+            <div class="input-row">
+              <input type="text" id="cfgRemoteFolder" readonly placeholder="Корневая папка (root)">
+              <button class="btn btn-sm" onclick="openDrivePicker()">☁ Выбрать в облаке...</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Автоматизация фоновой работы</div>
+          
+          <div class="switch-row">
+            <div class="switch-label-wrap">
+              <span class="switch-title">Автозапуск с Windows</span>
+              <span class="switch-desc">Запускать Google Sync Lite при старте системы в скрытом режиме (системный трей).</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="cfgAutostart" onchange="toggleAutostart(this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="form-group" style="margin-top: 14px;">
+            <label class="form-label">Интервал проверки изменений (минуты)</label>
+            <input type="number" id="cfgInterval" min="1" max="1440" style="max-width: 130px;">
+          </div>
+        </div>
+
+        <!-- Safety Shield Card -->
+        <div class="card" style="border-left: 3px solid var(--accent-green);">
+          <div class="card-title" style="color: #34d399;">
+            <span>🛡️ Щит максимальной безопасности (Zero Data Loss)</span>
+          </div>
+
+          <div class="switch-row">
+            <div class="switch-label-wrap">
+              <span class="switch-title">Разрешить удаление файлов на Google Диске</span>
+              <span class="switch-desc">Когда выключено, файлы в облаке НИКОГДА не удаляются. Никакой сбой, отключение внешнего диска или ошибка не смогут стереть файлы в Google Drive.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="cfgAllowRemoteDeletion">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="form-group" style="margin-top: 14px;">
+            <label class="form-label">Аварийный порог удаления (макс. файлов за цикл)</label>
+            <input type="number" id="cfgMaxDeleteThreshold" min="1" max="5000" style="max-width: 130px;" value="20">
+            <span style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+              Если за одну синхронизацию обнаружено удаление большего числа файлов, процесс немедленно прерывается для защиты от аварийного стирания.
+            </span>
+          </div>
+        </div>
+
+        <div>
+          <button class="btn btn-primary" onclick="saveSettings()">Сохранить настройки</button>
+        </div>
+      </div>
+
+      <!-- PAGE: LOGS -->
+      <div class="page" id="page-logs">
+        <div class="page-header">
+          <div class="page-title">Журнал событий</div>
+        </div>
+
+        <div class="terminal-window">
+          <div class="terminal-header">
+            <span>CONSOLE LOG • REAL-TIME OUTPUT</span>
+            <div class="terminal-actions">
+              <button class="terminal-btn" onclick="copyLogs()">Копировать</button>
+              <button class="terminal-btn" onclick="clearLogs()">Очистить</button>
+            </div>
+          </div>
+          <div class="terminal-body" id="terminalLog">Ожидание событий...</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Modal: Google Drive Folder Picker -->
+  <div class="modal-overlay" id="driveModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title">Выбор папки на Google Диске</div>
+        <button class="win-btn" onclick="closeDrivePicker()">✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="form-label">Папки в вашем Google Drive:</label>
+        <div class="folder-tree" id="driveFolderTree">
+          <div style="padding: 12px; color: var(--text-muted);">Загрузка структуры папок...</div>
+        </div>
+
+        <div style="margin-top: 6px;">
+          <label class="form-label">Или создать новую папку:</label>
+          <div class="input-row" style="margin-top: 4px;">
+            <input type="text" id="newFolderName" placeholder="Имя новой папки">
+            <button class="btn btn-sm" onclick="createDriveFolder()">Создать</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm" onclick="closeDrivePicker()">Отмена</button>
+        <button class="btn btn-primary btn-sm" onclick="confirmDrivePicker()">Выбрать эту папку</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>
