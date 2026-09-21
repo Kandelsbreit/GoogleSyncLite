@@ -14,6 +14,9 @@ type Config struct {
 	Autostart           bool   `json:"autostart"`
 	DryRun              bool   `json:"dry_run"`
 	SyncMode            string `json:"sync_mode"` // "local_master" or "two_way"
+	SafetyShield        bool   `json:"safety_shield"`
+	AllowRemoteDeletion bool   `json:"allow_remote_deletion"`
+	MaxDeleteThreshold  int    `json:"max_delete_threshold"`
 }
 
 var (
@@ -37,6 +40,9 @@ func LoadConfig() Config {
 		Autostart:           false,
 		DryRun:              false,
 		SyncMode:            "local_master",
+		SafetyShield:        true,
+		AllowRemoteDeletion: false,
+		MaxDeleteThreshold:  20,
 	}
 
 	data, err := os.ReadFile(ConfigFileName)
@@ -44,6 +50,9 @@ func LoadConfig() Config {
 		_ = json.Unmarshal(data, &appConfig)
 		if appConfig.SyncMode == "" {
 			appConfig.SyncMode = "local_master"
+		}
+		if appConfig.MaxDeleteThreshold <= 0 {
+			appConfig.MaxDeleteThreshold = 20
 		}
 	} else {
 		SaveConfigUnsafe(appConfig)

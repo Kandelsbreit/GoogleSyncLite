@@ -91,6 +91,15 @@ func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]Fil
 		return nil, fmt.Errorf("КРИТИЧЕСКАЯ ЗАЩИТА: Папка '%s' пуста, хотя в базе числится %d файлов! Диск может быть отключен. Синхронизация заблокирована во избежание удаления данных из облака.", s.localRoot, len(stored))
 	}
 
+	// Canary / Anchor file check: verify drive and folder identity
+	anchorPath := filepath.Join(s.localRoot, ".google_sync_anchor")
+	if _, err := os.Stat(anchorPath); os.IsNotExist(err) {
+		if len(stored) > 10 {
+			return nil, fmt.Errorf("КРИТИЧЕСКАЯ ЗАЩИТА: Файл привязки диска (.google_sync_anchor) не найден в '%s'! Диск отключен или сменилась буква. Проверьте накопитель!", s.localRoot)
+		}
+		_ = os.WriteFile(anchorPath, []byte("google-sync-lite-anchor-verified\n"), 0644)
+	}
+
 	seenPaths := make(map[string]bool)
 	changes := &LocalChanges{
 		NewOrChanged: make(map[string]FileState),
@@ -519,6 +528,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 
 	lastSyncTimeRFC := s.db.GetMeta("last_sync_rfc3339")
 	startTime := time.Now().UTC().Format(time.RFC3339)
+	cfg := GetConfig()
 
 	s.log(fmt.Sprintf("[*] Быстрое дельта-сканирование (Режим: %s)...", func() string {
 		if syncMode == "local_master" {
@@ -526,6 +536,15 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 		}
 		return "Двусторонняя синхронизация (Two-way)"
 	}()))
+
+	if cfg.SafetyShield {
+		s.log(fmt.Sprintf("    [🛡 Щит Безопасности: АКТИВЕН | Удаление в облаке: %s]", func() string {
+			if cfg.AllowRemoteDeletion {
+				return fmt.Sprintf("РАЗРЕШЕНО (порог: %d файлов)", cfg.MaxDeleteThreshold)
+			}
+			return "ЗАПРЕЩЕНО (файлы в облаке 100% защищены)"
+		}()))
+	}
 
 	// Step 1: Scan local directory for DELTA only
 	localChanges, err := s.ScanLocalDelta(ctx, stored)
@@ -678,6 +697,10 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 					}
 					summary.DownloadCount++
 				} else if syncMode == "local_master" {
+					if !cfg.AllowRemoteDeletion {
+						s.log(fmt.Sprintf("[🛡 Щит Безопасности] Файл отсутствует локально, но защищен от удаления: %s", path))
+						continue
+					}
 					// Safety Tripwire: Never delete from Google Drive if localRoot is unreadable or missing
 					if fi, err := os.Stat(s.localRoot); err != nil || !fi.IsDir() {
 						return summary, fmt.Errorf("удаление заблокировано: локальный диск недоступен (%s)", s.localRoot)
@@ -692,8 +715,8 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 			}
 		}
 
-		// In local_master mode, also clean up remote folders that do not exist locally
-		if syncMode == "local_master" {
+		// In local_master mode, clean up remote folders only if AllowRemoteDeletion is enabled
+		if syncMode == "local_master" && cfg.AllowRemoteDeletion {
 			// Safety Tripwire: Never delete folders if localRoot is unreadable or missing
 			if fi, err := os.Stat(s.localRoot); err != nil || !fi.IsDir() {
 				return summary, fmt.Errorf("удаление папок заблокировано: локальный диск недоступен (%s)", s.localRoot)
@@ -736,22 +759,33 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 
 	// 1. Process locally deleted files
 	if len(localChanges.Deleted) > 0 {
-		// Safety Tripwire: Never delete if localRoot is unreadable or missing
-		if fi, err := os.Stat(s.localRoot); err != nil || !fi.IsDir() {
-			return summary, fmt.Errorf("удаление заблокировано: локальный диск недоступен (%s)", s.localRoot)
+		if !cfg.AllowRemoteDeletion {
+			s.log(fmt.Sprintf("[🛡 Щит Безопасности] Локально не найдено %d файлов. Удаление в Google Диске ЗАПРЕЩЕНО — все файлы в облаке сохранены.", len(localChanges.Deleted)))
+			for _, delPath := range localChanges.Deleted {
+				s.log(fmt.Sprintf("    [сохранен в облаке] %s", delPath))
+			}
+		} else {
+			// Safety Tripwire: Never delete if localRoot is unreadable or missing
+			if fi, err := os.Stat(s.localRoot); err != nil || !fi.IsDir() {
+				return summary, fmt.Errorf("удаление заблокировано: локальный диск недоступен (%s)", s.localRoot)
+			}
+			// Blast Radius Threshold: Never delete more than MaxDeleteThreshold files without explicit user interaction
+			if len(localChanges.Deleted) > cfg.MaxDeleteThreshold {
+				return summary, fmt.Errorf("[🛡 Щит Безопасности] Превышен порог безопасного удаления (%d файлов > лимит %d). Операция прервана для защиты ваших данных! Измените лимит в Настройках, если удаление намеренное.", len(localChanges.Deleted), cfg.MaxDeleteThreshold)
+			}
+			for _, delPath := range localChanges.Deleted {
+				if ctx.Err() != nil {
+					return summary, ctx.Err()
+				}
+				st := stored[delPath]
+				s.log(fmt.Sprintf("[-] Удален локально: %s", delPath))
+				if !dryRun && st.FileID != "" {
+					_, _ = s.srv.Files.Update(st.FileID, &drive.File{Trashed: true}).Context(ctx).Do()
+				}
+				_ = s.db.RemoveFile(delPath)
+				summary.DeletedCount++
+			}
 		}
-	}
-	for _, delPath := range localChanges.Deleted {
-		if ctx.Err() != nil {
-			return summary, ctx.Err()
-		}
-		st := stored[delPath]
-		s.log(fmt.Sprintf("[-] Удален локально: %s", delPath))
-		if !dryRun && st.FileID != "" {
-			_, _ = s.srv.Files.Update(st.FileID, &drive.File{Trashed: true}).Context(ctx).Do()
-		}
-		_ = s.db.RemoveFile(delPath)
-		summary.DeletedCount++
 	}
 
 	// 2. Process locally new or changed files

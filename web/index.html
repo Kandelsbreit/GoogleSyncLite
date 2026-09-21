@@ -584,10 +584,14 @@
 
     <!-- Main Content -->
     <div class="content-area">
-
       <!-- Tab: Dashboard -->
       <div id="page-dashboard" class="page active">
-        <h2>Состояние синхронизации</h2>
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+          <h2 style="margin: 0;">Состояние синхронизации</h2>
+          <span style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; color: #34d399; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 6px; display: inline-flex; align-items: center; gap: 5px;">
+            <span>🛡️</span> <span>ЩИТ БЕЗОПАСНОСТИ: АКТИВЕН (Zero Data Loss)</span>
+          </span>
+        </div>
 
         <!-- Live Sync Status Banner -->
         <div class="sync-status-bar" id="syncStatusBar">
@@ -730,6 +734,31 @@
           </div>
         </div>
 
+        <div class="card" style="border-left: 3px solid #10b981;">
+          <div class="card-title" style="color: #10b981; display: flex; align-items: center; gap: 8px;">
+            <span>🛡️</span> <span>Щит максимальной безопасности (Zero Data Loss)</span>
+          </div>
+
+          <div class="switch-container">
+            <div class="switch-label">
+              <span style="font-weight: 600;">Разрешить удаление файлов в Google Диске</span>
+              <span class="switch-desc">Если выключено, файлы в облаке НИКОГДА не удаляются. Локальный диск не может стереть данные в облаке при отключении или ошибке.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="cfgAllowRemoteDeletion">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="form-group" style="margin-top: 16px;">
+            <label>Порог безопасности (максимум файлов на удаление за раз)</label>
+            <input type="number" id="cfgMaxDeleteThreshold" min="1" max="5000" style="max-width: 140px;" value="20">
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+              Аварийный предохранитель: если за один цикл запланировано удаление большего числа файлов, операция блокируется.
+            </div>
+          </div>
+        </div>
+
         <button class="btn btn-primary" onclick="saveSettings()">Сохранить параметры</button>
       </div>
 
@@ -817,6 +846,8 @@
         document.getElementById('cfgRemoteFolder').value = data.config.remote_folder_id;
         document.getElementById('cfgAutostart').checked = data.config.autostart;
         document.getElementById('cfgInterval').value = Math.max(1, Math.floor(data.config.sync_interval_seconds / 60));
+        document.getElementById('cfgAllowRemoteDeletion').checked = !!data.config.allow_remote_deletion;
+        document.getElementById('cfgMaxDeleteThreshold').value = data.config.max_delete_threshold || 20;
 
         // Update Sync Mode
         if (data.config.sync_mode) {
@@ -1057,12 +1088,16 @@
 
     async function saveSettings() {
       const intervalMin = parseInt(document.getElementById('cfgInterval').value) || 1;
+      const maxDel = parseInt(document.getElementById('cfgMaxDeleteThreshold').value) || 20;
       const cfg = {
         local_folder: document.getElementById('cfgLocalFolder').value.trim(),
         remote_folder_id: document.getElementById('cfgRemoteFolder').value.trim() || 'root',
         sync_interval_seconds: intervalMin * 60,
         autostart: document.getElementById('cfgAutostart').checked,
-        sync_mode: currentSyncMode
+        sync_mode: currentSyncMode,
+        safety_shield: true,
+        allow_remote_deletion: document.getElementById('cfgAllowRemoteDeletion').checked,
+        max_delete_threshold: maxDel
       };
 
       await fetch('/api/config', {
