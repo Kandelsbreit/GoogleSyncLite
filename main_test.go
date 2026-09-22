@@ -125,3 +125,25 @@ func TestPathsAnchoring(t *testing.T) {
 		t.Fatalf("expected absolute DatabasePath, got %s", dbPath)
 	}
 }
+
+func TestNormalizeConfig(t *testing.T) {
+	cfg := NormalizeConfig(Config{SyncMode: "unexpected", SyncIntervalSeconds: 1, MaxDeleteThreshold: 0})
+	if cfg.SyncMode != "local_master" {
+		t.Fatalf("unexpected sync mode: %s", cfg.SyncMode)
+	}
+	if cfg.SyncIntervalSeconds != 60 || cfg.MaxDeleteThreshold != 20 {
+		t.Fatalf("config defaults were not normalized: %+v", cfg)
+	}
+	if !cfg.SafetyShield {
+		t.Fatal("safety shield must remain enabled")
+	}
+}
+
+func TestWindowsSafeRelativePath(t *testing.T) {
+	if !IsWindowsSafeRelativePath("folder/file.txt") {
+		t.Fatal("ordinary relative path must be accepted")
+	}
+	if IsWindowsSafeRelativePath("folder/a:b.txt") {
+		t.Fatal("path with Windows-illegal characters must be rejected")
+	}
+}

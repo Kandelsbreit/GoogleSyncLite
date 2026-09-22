@@ -23,6 +23,7 @@ type DriveFileMeta struct {
 	ModifiedTime string
 	ParentID     string
 	IsDir        bool
+	Trashed      bool
 }
 
 type SyncSummary struct {
@@ -233,6 +234,22 @@ func (s *SyncEngineGo) GetOrComputeMD5(ctx context.Context, relPath string, loc 
 	return hash, nil
 }
 
+func (s *SyncEngineGo) localPathForRemote(relPath string) string {
+	return filepath.Clean(SanitizeWindowsPath(filepath.Join(s.localRoot, filepath.FromSlash(relPath))))
+}
+
+func firstParent(parents []string) string {
+	if len(parents) == 0 {
+		return ""
+	}
+	return parents[0]
+}
+
+func IsWindowsSafeRelativePath(relPath string) bool {
+	probe := filepath.Join("C:\\", filepath.FromSlash(relPath))
+	return filepath.ToSlash(filepath.Clean(probe)) == filepath.ToSlash(filepath.Clean(SanitizeWindowsPath(probe)))
+}
+
 func (s *SyncEngineGo) FetchRemoteTree(ctx context.Context) (map[string]DriveFileMeta, error) {
 	filesMap := make(map[string]DriveFileMeta)
 	s.foldersMap = make(map[string]string)
@@ -345,6 +362,10 @@ func (s *SyncEngineGo) FetchRemoteTree(ctx context.Context) (map[string]DriveFil
 				s.foldersMap[childRelPath] = child.id
 				queue = append(queue, queueItem{id: child.id, path: childRelPath})
 			} else {
+				if !IsWindowsSafeRelativePath(childRelPath) {
+					s.log(fmt.Sprintf("[!] Пропуск файла с несовместимым для Windows именем: %s", childRelPath))
+					continue
+				}
 				filesMap[childRelPath] = DriveFileMeta{
 					ID:           child.id,
 					Name:         child.name,
@@ -364,14 +385,14 @@ func (s *SyncEngineGo) FetchRemoteTree(ctx context.Context) (map[string]DriveFil
 
 // FetchRemoteDelta fetches ONLY files modified in Google Drive after lastSyncRFC3339.
 // If lastSyncRFC3339 is empty, falls back to full FetchRemoteTree.
-func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 string) (map[string]DriveFileMeta, bool, error) {
+func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 string, stored map[string]FileState) (map[string]DriveFileMeta, bool, error) {
 	if lastSyncRFC3339 == "" {
 		tree, err := s.FetchRemoteTree(ctx)
 		return tree, false, err
 	}
 
 	// Query only files changed since last sync
-	query := fmt.Sprintf("modifiedTime > '%s' and trashed = false", lastSyncRFC3339)
+	query := fmt.Sprintf("modifiedTime > '%s'", lastSyncRFC3339)
 	s.log(fmt.Sprintf("[*] Запрос изменений в Google Drive (с %s)...", lastSyncRFC3339))
 
 	filesMap := make(map[string]DriveFileMeta)
@@ -385,7 +406,7 @@ func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 str
 		call := s.srv.Files.List().
 			Q(query).
 			Spaces("drive").
-			Fields("nextPageToken, files(id, name, mimeType, md5Checksum, modifiedTime, size, parents)").
+			Fields("nextPageToken, files(id, name, mimeType, md5Checksum, modifiedTime, size, parents, trashed)").
 			PageSize(100)
 
 		if pageToken != "" {
@@ -399,6 +420,13 @@ func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 str
 			return tree, false, err
 		}
 
+		storedByID := make(map[string]string, len(stored))
+		for relPath, state := range stored {
+			if state.FileID != "" {
+				storedByID[state.FileID] = relPath
+			}
+		}
+
 		// Invert foldersMap (folderID -> relPath) to resolve parent directory paths
 		idToRelFolder := make(map[string]string)
 		for fRel, fID := range s.foldersMap {
@@ -407,6 +435,17 @@ func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 str
 
 		for _, f := range r.Files {
 			if f.MimeType != "application/vnd.google-apps.folder" {
+				if f.Trashed {
+					knownPath, ok := storedByID[f.Id]
+					if !ok {
+						continue
+					}
+					filesMap[knownPath] = DriveFileMeta{
+						ID: f.Id, Name: f.Name, Size: f.Size, MD5: f.Md5Checksum,
+						ModifiedTime: f.ModifiedTime, ParentID: firstParent(f.Parents), Trashed: f.Trashed,
+					}
+					continue
+				}
 				pID := ""
 				if len(f.Parents) > 0 {
 					pID = f.Parents[0]
@@ -414,7 +453,8 @@ func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 str
 
 				// Resolve relative path for this file
 				relPath := f.Name
-				if pID != "" && pID != s.remoteRoot && pID != "root" {
+				isRemoteRoot := pID == s.remoteRoot || (s.remoteRoot == "root" && pID == "root")
+				if pID != "" && !isRemoteRoot {
 					if parentRel, ok := idToRelFolder[pID]; ok && parentRel != "" {
 						relPath = parentRel + "/" + f.Name
 					} else {
@@ -425,6 +465,10 @@ func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 str
 					}
 				}
 
+				if !IsWindowsSafeRelativePath(relPath) {
+					s.log(fmt.Sprintf("[!] Пропуск удалённого файла с несовместимым для Windows именем: %s", relPath))
+					continue
+				}
 				filesMap[relPath] = DriveFileMeta{
 					ID:           f.Id,
 					Name:         f.Name,
@@ -433,6 +477,7 @@ func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 str
 					ModifiedTime: f.ModifiedTime,
 					ParentID:     pID,
 					IsDir:        false,
+					Trashed:      f.Trashed,
 				}
 			}
 		}
@@ -585,7 +630,9 @@ func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, 
 
 	localDestPath = cleanDestPath
 	tmpDest := localDestPath + ".tmp"
-	_ = os.MkdirAll(filepath.Dir(localDestPath), 0755)
+	if err := os.MkdirAll(filepath.Dir(localDestPath), 0755); err != nil {
+		return fmt.Errorf("не удалось создать локальную папку для %s: %w", localDestPath, err)
+	}
 
 	resp, err := s.srv.Files.Get(fileID).Context(ctx).Download()
 	if err != nil {
@@ -611,12 +658,19 @@ func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, 
 		os.Remove(tmpDest)
 		return syncErr
 	}
-	out.Close()
+	if closeErr := out.Close(); closeErr != nil {
+		_ = os.Remove(tmpDest)
+		return closeErr
+	}
 
 	// Verify MD5 before replacing target file
 	if expectedMD5 != "" {
 		chkMD5, err := ComputeMD5(tmpDest)
-		if err == nil && chkMD5 != expectedMD5 {
+		if err != nil {
+			_ = os.Remove(tmpDest)
+			return fmt.Errorf("не удалось проверить целостность скачанного файла %s: %w", localDestPath, err)
+		}
+		if chkMD5 != expectedMD5 {
 			os.Remove(tmpDest)
 			return fmt.Errorf("ошибка целостности MD5 для %s (ожидался: %s, получен: %s)", localDestPath, expectedMD5, chkMD5)
 		}
@@ -789,7 +843,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 	} else {
 		// two_way mode
 		if len(stored) > 0 && lastSyncTimeRFC != "" {
-			remoteFiles, isDelta, err = s.FetchRemoteDelta(ctx, lastSyncTimeRFC)
+			remoteFiles, isDelta, err = s.FetchRemoteDelta(ctx, lastSyncTimeRFC, stored)
 			if err != nil {
 				return nil, err
 			}
@@ -808,11 +862,29 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 	}
 
 	summary := &SyncSummary{}
+	operationFailed := false
+	if syncMode == "two_way" {
+		for path, rem := range remoteFiles {
+			if _, locallyChanged := localChanges.NewOrChanged[path]; !locallyChanged {
+				continue
+			}
+			summary.ConflictCount++
+			if rem.Trashed {
+				return summary, fmt.Errorf("конфликт: файл '%s' изменён локально, но удалён в Google Drive; изменения не применены", path)
+			}
+			return summary, fmt.Errorf("конфликт: файл '%s' изменён и локально, и в Google Drive; изменения не применены", path)
+		}
+	}
 
 	// If no local changes and no remote changes -> instant completion!
 	if len(localChanges.NewOrChanged) == 0 && len(localChanges.Deleted) == 0 && len(remoteFiles) == 0 {
 		s.log("[✓] Изменений не обнаружено. Все файлы синхронизированы.")
-		s.db.SetMeta("last_sync_rfc3339", startTime)
+		if operationFailed {
+			return summary, fmt.Errorf("синхронизация завершена с ошибками; контрольная точка не обновлена, проблемные операции будут повторены")
+		}
+		if err := s.db.SetMeta("last_sync_rfc3339", startTime); err != nil {
+			return summary, err
+		}
 		return summary, nil
 	}
 
@@ -848,7 +920,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 			}
 			loc, hasLoc := localChanges.NewOrChanged[path]
 			rem, hasRem := remoteFiles[path]
-			localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(path))
+			localFullPath := s.localPathForRemote(path)
 
 			if hasLoc && hasRem {
 				locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
@@ -868,6 +940,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 					if !dryRun {
 						res, err := s.UpdateFile(ctx, rem.ID, localFullPath)
 						if err != nil {
+							operationFailed = true
 							s.log(fmt.Sprintf("[!] Ошибка обновления файла %s в Google Drive: %v", path, err))
 						} else {
 							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
@@ -897,11 +970,13 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 				if !dryRun {
 					parentID, err := s.EnsureRemoteFolder(ctx, pathPkg.Dir(path))
 					if err != nil {
+						operationFailed = true
 						s.log(fmt.Sprintf("[!] Ошибка создания папки для %s: %v", path, err))
 					} else {
 						fileName := pathPkg.Base(path)
 						res, err := s.UploadFile(ctx, localFullPath, parentID, fileName)
 						if err != nil {
+							operationFailed = true
 							s.log(fmt.Sprintf("[!] Ошибка загрузки файла %s в Google Drive: %v", path, err))
 						} else {
 							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
@@ -928,10 +1003,25 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 				}
 			} else if hasRem && !hasLoc {
 				if syncMode == "two_way" {
+					if rem.Trashed {
+						localPath := s.localPathForRemote(path)
+						if !dryRun {
+							if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
+								return summary, fmt.Errorf("не удалось применить удаление из Google Drive для %s: %w", path, err)
+							}
+						}
+						if err := s.db.RemoveFile(path); err != nil {
+							return summary, err
+						}
+						s.log(fmt.Sprintf("[-] Удалено локально вслед за Google Drive: %s", path))
+						summary.DeletedCount++
+						continue
+					}
 					s.log(fmt.Sprintf("[↓] Скачивание из облака: %s", path))
 					dlOk := false
 					if !dryRun {
 						if err := s.DownloadFile(ctx, rem.ID, localFullPath, rem.MD5); err != nil {
+							operationFailed = true
 							s.log(fmt.Sprintf("[!] Ошибка скачивания %s: %v", path, err))
 						} else {
 							fi, _ := os.Stat(localFullPath)
@@ -1047,7 +1137,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 		if ctx.Err() != nil {
 			return summary, ctx.Err()
 		}
-		localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(path))
+		localFullPath := s.localPathForRemote(path)
 		st, inDB := stored[path]
 
 		if inDB && st.FileID != "" {
@@ -1076,10 +1166,12 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 								})
 								uploadOk = true
 							} else {
+								operationFailed = true
 								s.log(fmt.Sprintf("[!] Ошибка повторной загрузки %s: %v", path, upErr))
 							}
 						}
 					} else {
+						operationFailed = true
 						s.log(fmt.Sprintf("[!] Ошибка обновления файла %s в Google Drive: %v", path, err))
 					}
 				} else {
@@ -1110,6 +1202,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 			if !dryRun {
 				parentID, err := s.EnsureRemoteFolder(ctx, pathPkg.Dir(path))
 				if err != nil {
+					operationFailed = true
 					s.log(fmt.Sprintf("[!] Ошибка создания папки для %s: %v", path, err))
 				} else {
 					fileName := pathPkg.Base(path)
@@ -1134,6 +1227,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 						} else {
 							res, err := s.UpdateFile(ctx, existID, localFullPath)
 							if err != nil {
+								operationFailed = true
 								s.log(fmt.Sprintf("[!] Ошибка обновления существующего файла %s в Google Drive: %v", path, err))
 							} else {
 								if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
@@ -1154,6 +1248,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 						// New upload
 						res, err := s.UploadFile(ctx, localFullPath, parentID, fileName)
 						if err != nil {
+							operationFailed = true
 							s.log(fmt.Sprintf("[!] Ошибка загрузки нового файла %s в Google Drive: %v", path, err))
 						} else {
 							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
@@ -1194,7 +1289,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 				continue
 			}
 
-			localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(relName))
+			localFullPath := s.localPathForRemote(relName)
 
 			// Check if local file exists and already has identical MD5
 			if rem.MD5 != "" {
@@ -1218,6 +1313,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 			dlOk := false
 			if !dryRun {
 				if err := s.DownloadFile(ctx, rem.ID, localFullPath, rem.MD5); err != nil {
+					operationFailed = true
 					s.log(fmt.Sprintf("[!] Ошибка скачивания %s: %v", relName, err))
 				} else {
 					fi, _ := os.Stat(localFullPath)
@@ -1239,7 +1335,12 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 		}
 	}
 
-	s.db.SetMeta("last_sync_rfc3339", startTime)
+	if operationFailed {
+		return summary, fmt.Errorf("синхронизация завершена с ошибками; контрольная точка не обновлена, проблемные операции будут повторены")
+	}
+	if err := s.db.SetMeta("last_sync_rfc3339", startTime); err != nil {
+		return summary, err
+	}
 	return summary, nil
 }
 
@@ -1264,7 +1365,7 @@ func (s *SyncEngineGo) VerifyIntegrity(ctx context.Context) (int, int, []string,
 		}
 
 		st, inDB := stored[path]
-		localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(path))
+		localFullPath := s.localPathForRemote(path)
 		fi, err := os.Stat(localFullPath)
 		if err != nil {
 			errorsList = append(errorsList, fmt.Sprintf("Отсутствует локально: %s", path))

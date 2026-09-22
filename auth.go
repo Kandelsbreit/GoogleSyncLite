@@ -66,12 +66,30 @@ func LoadSavedToken() (*oauth2.Token, error) {
 }
 
 func SaveToken(tok *oauth2.Token) error {
-	f, err := os.OpenFile(TokenPath(), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	data, err := json.Marshal(tok)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return json.NewEncoder(f).Encode(tok)
+	tmpPath := TokenPath() + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, TokenPath())
 }
 
 func OpenBrowser(targetURL string) error {
@@ -157,7 +175,9 @@ func AuthenticateViaBrowser() (*oauth2.Token, error) {
 		if err != nil {
 			return nil, fmt.Errorf("ошибка обмена токена: %w", err)
 		}
-		_ = SaveToken(tok)
+		if err := SaveToken(tok); err != nil {
+			return nil, fmt.Errorf("не удалось сохранить токен авторизации: %w", err)
+		}
 		return tok, nil
 	case err := <-errChan:
 		_ = server.Shutdown(context.Background())
@@ -183,7 +203,9 @@ func GetDriveService(ctx context.Context) (*drive.Service, error) {
 	// Refresh check & save back if changed
 	newTok, err := tokenSource.Token()
 	if err == nil && newTok.AccessToken != tok.AccessToken {
-		_ = SaveToken(newTok)
+		if err := SaveToken(newTok); err != nil {
+			return nil, fmt.Errorf("не удалось сохранить обновлённый токен: %w", err)
+		}
 	}
 
 	return drive.NewService(ctx, option.WithTokenSource(tokenSource))

@@ -58,6 +58,20 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 	a.syncMutex.Unlock()
 
+	// Do not close the SQLite handle while a cancelled sync goroutine can still
+	// be using it. Network calls honour the context; give them a short grace
+	// period before Wails tears the process down.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		a.syncMutex.Lock()
+		running := a.isSyncing
+		a.syncMutex.Unlock()
+		if !running {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
 	if a.tray != nil {
 		a.tray.Stop()
 	}

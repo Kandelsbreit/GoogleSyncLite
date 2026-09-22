@@ -18,6 +18,26 @@ type Config struct {
 	MaxDeleteThreshold  int    `json:"max_delete_threshold"`
 }
 
+func NormalizeConfig(cfg Config) Config {
+	if cfg.LocalFolder == "" {
+		cfg.LocalFolder = DefaultSyncFolderPath()
+	}
+	if cfg.RemoteFolderID == "" {
+		cfg.RemoteFolderID = "root"
+	}
+	if cfg.SyncIntervalSeconds < 30 {
+		cfg.SyncIntervalSeconds = 60
+	}
+	if cfg.SyncMode != "local_master" && cfg.SyncMode != "two_way" {
+		cfg.SyncMode = "local_master"
+	}
+	if cfg.MaxDeleteThreshold <= 0 {
+		cfg.MaxDeleteThreshold = 20
+	}
+	cfg.SafetyShield = true
+	return cfg
+}
+
 var (
 	configLock sync.RWMutex
 	appConfig  Config
@@ -49,12 +69,7 @@ func LoadConfig() Config {
 			// Backup corrupted config so user settings aren't lost silently
 			_ = os.WriteFile(cfgPath+".bak", data, 0644)
 		}
-		if appConfig.SyncMode == "" {
-			appConfig.SyncMode = "local_master"
-		}
-		if appConfig.MaxDeleteThreshold <= 0 {
-			appConfig.MaxDeleteThreshold = 20
-		}
+		appConfig = NormalizeConfig(appConfig)
 	} else {
 		SaveConfigUnsafe(appConfig)
 	}
@@ -70,6 +85,7 @@ func GetConfig() Config {
 func SaveConfig(cfg Config) error {
 	configLock.Lock()
 	defer configLock.Unlock()
+	cfg = NormalizeConfig(cfg)
 	appConfig = cfg
 	return SaveConfigUnsafe(cfg)
 }

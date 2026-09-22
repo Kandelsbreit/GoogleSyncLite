@@ -107,6 +107,9 @@ func (d *Database) GetAllFiles() (map[string]FileState, error) {
 		s.IsDir = isDirInt == 1
 		result[s.RelPath] = s
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
