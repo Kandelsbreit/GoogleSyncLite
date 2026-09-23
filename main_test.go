@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -145,5 +146,106 @@ func TestWindowsSafeRelativePath(t *testing.T) {
 	}
 	if IsWindowsSafeRelativePath("folder/a:b.txt") {
 		t.Fatal("path with Windows-illegal characters must be rejected")
+	}
+}
+
+func TestScanLocalDeltaRejectsSymlinkWithoutProducingDeletions(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "normal.txt"), []byte("ok"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linked.txt")); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	engine := &SyncEngineGo{localRoot: root}
+	changes, err := engine.ScanLocalDelta(context.Background(), map[string]FileState{
+		"linked.txt": {RelPath: "linked.txt", MD5: "previous"},
+	})
+	if err == nil {
+		t.Fatal("expected scan to fail when it encounters a symlink")
+	}
+	if changes != nil {
+		t.Fatalf("incomplete scan must not return changes that could imply deletion: %+v", changes)
+	}
+}
+
+func TestRootedLocalAccessRejectsSymlinkEscapeAndAllowsRegularFile(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "redirect")); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	engine := &SyncEngineGo{localRoot: root}
+
+	if _, err := engine.openLocalPath(filepath.Join(root, "redirect", "secret.txt")); err == nil {
+		t.Fatal("expected rooted open to reject a symlink escape")
+	}
+	if err := engine.removeLocalPath(filepath.Join(root, "redirect", "secret.txt")); err == nil {
+		t.Fatal("expected rooted remove to reject a symlink escape")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "secret.txt")); !os.IsNotExist(err) {
+		t.Fatalf("outside file should remain absent, stat error: %v", err)
+	}
+
+	regular := filepath.Join(root, "regular.txt")
+	if err := os.WriteFile(regular, []byte("regular"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := engine.openLocalPath(regular)
+	if err != nil {
+		t.Fatalf("regular in-root file should open: %v", err)
+	}
+	_ = file.Close()
+	if _, err := engine.statLocalPath(regular); err != nil {
+		t.Fatalf("regular in-root file should stat: %v", err)
+	}
+}
+
+func TestSyncRootRejectsSymlinkToExternalDirectory(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("outside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "sync-root")
+	if err := os.Symlink(outside, root); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	for _, linkedRoot := range []string{root, root + string(os.PathSeparator)} {
+		t.Run(filepath.Base(filepath.Clean(linkedRoot)), func(t *testing.T) {
+			engine := &SyncEngineGo{localRoot: linkedRoot}
+			if _, err := engine.openLocalPath(filepath.Join(linkedRoot, "secret.txt")); err == nil {
+				t.Fatal("rooted file access must reject a linked sync root")
+			}
+			changes, err := engine.ScanLocalDelta(context.Background(), nil)
+			if err == nil {
+				t.Fatal("scan must reject a linked sync root")
+			}
+			if changes != nil {
+				t.Fatalf("linked sync root must not produce a snapshot: %+v", changes)
+			}
+		})
+	}
+}
+
+func TestDownloadFileRejectsSymlinkParentBeforeNetworkRequest(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "redirect")); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	engine := &SyncEngineGo{localRoot: root}
+	err := engine.DownloadFile(context.Background(), "file-id", filepath.Join(root, "redirect", "new", "file.txt"), "")
+	if err == nil {
+		t.Fatal("expected download destination through symlink to be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "new")); !os.IsNotExist(err) {
+		t.Fatalf("download must not create directories outside the root, stat error: %v", err)
 	}
 }

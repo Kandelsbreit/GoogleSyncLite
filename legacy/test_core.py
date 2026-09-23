@@ -4,6 +4,7 @@ import tempfile
 import shutil
 from hasher import compute_md5
 from db import StateDB
+from syncer import SyncEngine
 
 class TestSyncCore(unittest.TestCase):
     def setUp(self):
@@ -34,6 +35,33 @@ class TestSyncCore(unittest.TestCase):
         
         self.db.remove_file("docs/note.txt")
         self.assertIsNone(self.db.get_file("docs/note.txt"))
+
+    def test_sync_refuses_missing_local_root_before_remote_access(self):
+        missing_root = os.path.join(self.test_dir, "missing")
+
+        class RemoteMustNotBeCalled:
+            def list_folder_contents(self, _folder_id):
+                raise AssertionError("remote tree must not be fetched when local root is missing")
+
+        engine = SyncEngine(missing_root, "root-id", RemoteMustNotBeCalled(), self.db)
+        with self.assertRaises(FileNotFoundError):
+            engine.sync()
+        self.assertFalse(os.path.exists(missing_root))
+
+    def test_scan_refuses_symlink_without_returning_partial_snapshot(self):
+        root = os.path.join(self.test_dir, "sync")
+        os.mkdir(root)
+        outside = os.path.join(self.test_dir, "outside.txt")
+        with open(outside, "wb") as f:
+            f.write(b"outside")
+        try:
+            os.symlink(outside, os.path.join(root, "linked.txt"))
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink creation unavailable: {exc}")
+
+        engine = SyncEngine(root, "root-id", None, self.db)
+        with self.assertRaises(OSError):
+            engine.scan_local_files()
 
 if __name__ == "__main__":
     unittest.main()

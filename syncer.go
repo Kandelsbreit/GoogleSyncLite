@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	pathPkg "path"
 	"path/filepath"
@@ -34,6 +35,14 @@ type SyncSummary struct {
 	ConflictCount int
 }
 
+type rootedLocalFS struct {
+	root *os.Root
+}
+
+func (r rootedLocalFS) Open(name string) (fs.File, error) {
+	return r.root.Open(name)
+}
+
 type SyncEngineGo struct {
 	srv         *drive.Service
 	db          *Database
@@ -60,6 +69,102 @@ func (s *SyncEngineGo) log(msg string) {
 	if s.logCallback != nil {
 		s.logCallback(msg)
 	}
+}
+
+func (s *SyncEngineGo) relativeLocalPath(localPath string) (string, error) {
+	rootPath, err := filepath.Abs(s.localRoot)
+	if err != nil {
+		return "", err
+	}
+	fullPath, err := filepath.Abs(localPath)
+	if err != nil {
+		return "", err
+	}
+	relPath, err := filepath.Rel(rootPath, fullPath)
+	if err != nil {
+		return "", err
+	}
+	relPath = filepath.Clean(relPath)
+	if relPath == "." || relPath == ".." || strings.HasPrefix(relPath, ".."+string(os.PathSeparator)) || filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("путь выходит за пределы папки синхронизации: %s", localPath)
+	}
+	return relPath, nil
+}
+
+func (s *SyncEngineGo) openLocalRoot() (*os.Root, error) {
+	rootPath := filepath.Clean(s.localRoot)
+	rootInfo, err := os.Lstat(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return nil, fmt.Errorf("корень синхронизации не может быть ссылкой или не является папкой: %s", rootPath)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	openedInfo, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	if !os.SameFile(rootInfo, openedInfo) {
+		_ = root.Close()
+		return nil, fmt.Errorf("корень синхронизации изменился при открытии: %s", rootPath)
+	}
+	return root, nil
+}
+
+func (s *SyncEngineGo) openLocalPath(localPath string) (*os.File, error) {
+	relPath, err := s.relativeLocalPath(localPath)
+	if err != nil {
+		return nil, err
+	}
+	root, err := s.openLocalRoot()
+	if err != nil {
+		return nil, err
+	}
+	file, openErr := root.Open(relPath)
+	_ = root.Close()
+	return file, openErr
+}
+
+func (s *SyncEngineGo) statLocalPath(localPath string) (os.FileInfo, error) {
+	relPath, err := s.relativeLocalPath(localPath)
+	if err != nil {
+		return nil, err
+	}
+	root, err := s.openLocalRoot()
+	if err != nil {
+		return nil, err
+	}
+	info, statErr := root.Stat(relPath)
+	_ = root.Close()
+	return info, statErr
+}
+
+func (s *SyncEngineGo) removeLocalPath(localPath string) error {
+	relPath, err := s.relativeLocalPath(localPath)
+	if err != nil {
+		return err
+	}
+	root, err := s.openLocalRoot()
+	if err != nil {
+		return err
+	}
+	removeErr := root.Remove(relPath)
+	_ = root.Close()
+	return removeErr
+}
+
+func (s *SyncEngineGo) computeMD5LocalPath(localPath string) (string, error) {
+	file, err := s.openLocalPath(localPath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	return computeMD5Reader(file)
 }
 
 // IsIgnoredRelPath checks if a relative path or filename should be skipped by synchronization
@@ -90,38 +195,66 @@ type LocalChanges struct {
 // Unchanged files are NOT added to the processing queue.
 func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]FileState) (*LocalChanges, error) {
 	// Pre-flight safety check: ensure the local directory / drive exists and is accessible
-	st, err := os.Stat(s.localRoot)
+	root, err := s.openLocalRoot()
 	if os.IsNotExist(err) {
 		return nil, fmt.Errorf("локальная папка не найдена или диск отключен: '%s'", s.localRoot)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("ошибка доступа к локальному диску/папке '%s': %w", s.localRoot, err)
 	}
-	if !st.IsDir() {
-		return nil, fmt.Errorf("указанный путь '%s' не является папкой", s.localRoot)
-	}
+	defer root.Close()
 
 	// Verify the folder can actually be read
-	entries, err := os.ReadDir(s.localRoot)
+	rootDir, err := root.Open(".")
 	if err != nil {
-		return nil, fmt.Errorf("не удалось прочитать содержимое папки '%s' (диск отключен или заблокирован): %w", s.localRoot, err)
+		return nil, fmt.Errorf("не удалось открыть содержимое папки '%s': %w", s.localRoot, err)
+	}
+	entries, readErr := rootDir.ReadDir(-1)
+	closeErr := rootDir.Close()
+	if readErr == nil {
+		readErr = closeErr
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("не удалось прочитать содержимое папки '%s' (диск отключен или заблокирован): %w", s.localRoot, readErr)
 	}
 
 	// If database already contains many files, but the root folder is completely empty, trigger safety abort!
 	if len(stored) > 10 && len(entries) == 0 {
 		return nil, fmt.Errorf("КРИТИЧЕСКАЯ ЗАЩИТА: Папка '%s' пуста, хотя в базе числится %d файлов! Диск может быть отключен. Синхронизация заблокирована во избежание удаления данных из облака.", s.localRoot, len(stored))
 	}
-
 	// Canary / Anchor file check: verify drive and folder identity
-	anchorPath := filepath.Join(s.localRoot, ".google_sync_anchor")
+	anchorName := ".google_sync_anchor"
 	const expectedAnchor = "google-sync-lite-anchor-verified\n"
-	anchorBytes, err := os.ReadFile(anchorPath)
-	if os.IsNotExist(err) {
+	anchorInfo, anchorErr := root.Lstat(anchorName)
+	if anchorErr == nil && anchorInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("файл привязки диска не может быть символической ссылкой: %s", filepath.Join(s.localRoot, anchorName))
+	}
+	if os.IsNotExist(anchorErr) {
 		if len(stored) > 10 {
 			return nil, fmt.Errorf("КРИТИЧЕСКАЯ ЗАЩИТА: Файл привязки диска (.google_sync_anchor) не найден в '%s'! Диск отключен или сменилась буква. Проверьте накопитель!", s.localRoot)
 		}
-		_ = os.WriteFile(anchorPath, []byte(expectedAnchor), 0644)
-	} else if err == nil {
+		anchorFile, err := root.OpenFile(anchorName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("не удалось безопасно создать файл привязки диска: %w", err)
+		}
+		_, writeErr := anchorFile.Write([]byte(expectedAnchor))
+		closeErr := anchorFile.Close()
+		if writeErr != nil {
+			return nil, fmt.Errorf("не удалось записать файл привязки диска: %w", writeErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("не удалось закрыть файл привязки диска: %w", closeErr)
+		}
+	} else if anchorErr != nil {
+		return nil, fmt.Errorf("не удалось проверить файл привязки диска: %w", anchorErr)
+	} else {
+		if _, err := root.Stat(anchorName); err != nil {
+			return nil, fmt.Errorf("не удалось безопасно проверить файл привязки диска: %w", err)
+		}
+		anchorBytes, err := root.ReadFile(anchorName)
+		if err != nil {
+			return nil, fmt.Errorf("не удалось прочитать файл привязки диска: %w", err)
+		}
 		if strings.TrimSpace(string(anchorBytes)) != strings.TrimSpace(expectedAnchor) {
 			return nil, fmt.Errorf("КРИТИЧЕСКАЯ ЗАЩИТА: Поврежден или подменен идентификатор папки привязки (.google_sync_anchor) в '%s'! Проверьте правильность выбранного диска.", s.localRoot)
 		}
@@ -135,31 +268,37 @@ func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]Fil
 	count := 0
 	lastReport := time.Now()
 
-	err = filepath.Walk(s.localRoot, func(path string, info os.FileInfo, err error) error {
+	err = fs.WalkDir(rootedLocalFS{root: root}, ".", func(path string, _ fs.DirEntry, err error) error {
 		if err != nil {
-			if path == s.localRoot {
-				return fmt.Errorf("ошибка доступа к корневой папке '%s': %w", s.localRoot, err)
-			}
-			s.log(fmt.Sprintf("[!] Пропуск недоступного файла/папки: %s (%v)", path, err))
-			return nil
+			return fmt.Errorf("неполное сканирование: не удалось прочитать '%s': %w", path, err)
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		cleanRel := path
+		rootedRel := filepath.FromSlash(cleanRel)
+		entryInfo, err := root.Lstat(rootedRel)
+		if err != nil {
+			return fmt.Errorf("не удалось безопасно проверить '%s': %w", path, err)
+		}
+		if entryInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("синхронизация остановлена: обнаружена символическая ссылка или reparse point '%s'", path)
+		}
+		info, err := root.Stat(rootedRel)
+		if err != nil {
+			return fmt.Errorf("не удалось безопасно проверить '%s': %w", path, err)
+		}
+		if path != "." && !info.IsDir() && !entryInfo.Mode().IsRegular() {
+			return fmt.Errorf("синхронизация остановлена: неподдерживаемый тип файла '%s'", path)
+		}
 
 		if info.IsDir() {
 			name := info.Name()
-			if strings.HasPrefix(name, ".") || name == "__pycache__" || name == "$RECYCLE.BIN" || name == "System Volume Information" {
-				return filepath.SkipDir
+			if path != "." && (strings.HasPrefix(name, ".") || name == "__pycache__" || name == "$RECYCLE.BIN" || name == "System Volume Information") {
+				return fs.SkipDir
 			}
 			return nil
 		}
-
-		rel, err := filepath.Rel(s.localRoot, path)
-		if err != nil {
-			return nil
-		}
-		cleanRel := filepath.ToSlash(rel)
 
 		if IsIgnoredRelPath(cleanRel) {
 			return nil
@@ -226,7 +365,7 @@ func (s *SyncEngineGo) GetOrComputeMD5(ctx context.Context, relPath string, loc 
 		return cached, nil
 	}
 	localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(relPath))
-	hash, err := ComputeMD5(localFullPath)
+	hash, err := s.computeMD5LocalPath(localFullPath)
 	if err != nil {
 		return "", err
 	}
@@ -619,19 +758,21 @@ func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, 
 		return ctx.Err()
 	}
 
-	cleanLocalRoot := filepath.Clean(s.localRoot)
 	cleanDestPath := filepath.Clean(SanitizeWindowsPath(localDestPath))
-
-	// Strict Path Traversal Guard: destination MUST reside within s.localRoot
-	rel, err := filepath.Rel(cleanLocalRoot, cleanDestPath)
-	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-		return fmt.Errorf("попытка выхода за пределы папки синхронизации (Path Traversal заблокирован): %s", localDestPath)
+	relDest, err := s.relativeLocalPath(cleanDestPath)
+	if err != nil {
+		return fmt.Errorf("попытка выхода за пределы папки синхронизации (Path Traversal заблокирован): %w", err)
 	}
-
-	localDestPath = cleanDestPath
-	tmpDest := localDestPath + ".tmp"
-	if err := os.MkdirAll(filepath.Dir(localDestPath), 0755); err != nil {
-		return fmt.Errorf("не удалось создать локальную папку для %s: %w", localDestPath, err)
+	root, err := s.openLocalRoot()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	tmpDest := relDest + ".tmp"
+	if parent := filepath.Dir(relDest); parent != "." {
+		if err := root.MkdirAll(parent, 0755); err != nil {
+			return fmt.Errorf("не удалось безопасно создать локальную папку для %s: %w", cleanDestPath, err)
+		}
 	}
 
 	resp, err := s.srv.Files.Get(fileID).Context(ctx).Download()
@@ -640,7 +781,10 @@ func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, 
 	}
 	defer resp.Body.Close()
 
-	out, err := os.Create(tmpDest)
+	if err := root.Remove(tmpDest); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("не удалось удалить временный файл предыдущей загрузки %s: %w", cleanDestPath, err)
+	}
+	out, err := root.OpenFile(tmpDest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		return err
 	}
@@ -648,37 +792,47 @@ func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, 
 	_, copyErr := io.Copy(out, resp.Body)
 	if copyErr != nil {
 		out.Close()
-		os.Remove(tmpDest)
+		_ = root.Remove(tmpDest)
 		return copyErr
 	}
 
 	// Flush OS write buffers to physical disk to prevent zero-byte corrupt files on power loss
 	if syncErr := out.Sync(); syncErr != nil {
 		out.Close()
-		os.Remove(tmpDest)
+		_ = root.Remove(tmpDest)
 		return syncErr
 	}
 	if closeErr := out.Close(); closeErr != nil {
-		_ = os.Remove(tmpDest)
+		_ = root.Remove(tmpDest)
 		return closeErr
 	}
 
 	// Verify MD5 before replacing target file
 	if expectedMD5 != "" {
-		chkMD5, err := ComputeMD5(tmpDest)
+		tmpFile, err := root.Open(tmpDest)
 		if err != nil {
-			_ = os.Remove(tmpDest)
-			return fmt.Errorf("не удалось проверить целостность скачанного файла %s: %w", localDestPath, err)
+			_ = root.Remove(tmpDest)
+			return fmt.Errorf("не удалось проверить целостность скачанного файла %s: %w", cleanDestPath, err)
+		}
+		chkMD5, hashErr := computeMD5Reader(tmpFile)
+		closeErr := tmpFile.Close()
+		if hashErr != nil {
+			_ = root.Remove(tmpDest)
+			return fmt.Errorf("не удалось проверить целостность скачанного файла %s: %w", cleanDestPath, hashErr)
+		}
+		if closeErr != nil {
+			_ = root.Remove(tmpDest)
+			return fmt.Errorf("не удалось закрыть временный файл %s: %w", cleanDestPath, closeErr)
 		}
 		if chkMD5 != expectedMD5 {
-			os.Remove(tmpDest)
-			return fmt.Errorf("ошибка целостности MD5 для %s (ожидался: %s, получен: %s)", localDestPath, expectedMD5, chkMD5)
+			_ = root.Remove(tmpDest)
+			return fmt.Errorf("ошибка целостности MD5 для %s (ожидался: %s, получен: %s)", cleanDestPath, expectedMD5, chkMD5)
 		}
 	}
 
 	// Atomically replace target file
-	if renameErr := os.Rename(tmpDest, localDestPath); renameErr != nil {
-		_ = os.Remove(tmpDest) // Clean orphaned .tmp on rename error
+	if renameErr := root.Rename(tmpDest, relDest); renameErr != nil {
+		_ = root.Remove(tmpDest) // Clean orphaned .tmp on rename error
 		return renameErr
 	}
 	return nil
@@ -714,7 +868,7 @@ func (s *SyncEngineGo) UploadFile(ctx context.Context, localPath, parentID, remo
 			}
 		}
 
-		f, err := os.Open(localPath)
+		f, err := s.openLocalPath(localPath)
 		if err != nil {
 			return nil, err
 		}
@@ -755,7 +909,7 @@ func (s *SyncEngineGo) UpdateFile(ctx context.Context, fileID, localPath string)
 			}
 		}
 
-		f, err := os.Open(localPath)
+		f, err := s.openLocalPath(localPath)
 		if err != nil {
 			return nil, err
 		}
@@ -1006,7 +1160,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 					if rem.Trashed {
 						localPath := s.localPathForRemote(path)
 						if !dryRun {
-							if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
+							if err := s.removeLocalPath(localPath); err != nil && !os.IsNotExist(err) {
 								return summary, fmt.Errorf("не удалось применить удаление из Google Drive для %s: %w", path, err)
 							}
 						}
@@ -1024,7 +1178,12 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 							operationFailed = true
 							s.log(fmt.Sprintf("[!] Ошибка скачивания %s: %v", path, err))
 						} else {
-							fi, _ := os.Stat(localFullPath)
+							fi, err := s.statLocalPath(localFullPath)
+							if err != nil {
+								operationFailed = true
+								s.log(fmt.Sprintf("[!] Не удалось проверить скачанный файл %s: %v", path, err))
+								continue
+							}
 							_ = s.db.UpsertFile(FileState{
 								RelPath: path,
 								FileID:  rem.ID,
@@ -1080,7 +1239,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 					return summary, ctx.Err()
 				}
 				localFolder := filepath.Join(s.localRoot, filepath.FromSlash(fPath))
-				if _, err := os.Stat(localFolder); os.IsNotExist(err) {
+				if _, err := s.statLocalPath(localFolder); os.IsNotExist(err) {
 					folderID := s.foldersMap[fPath]
 					if folderID != "" && folderID != s.remoteRoot {
 						s.log(fmt.Sprintf("[-] Удаление лишней папки из Google Drive: %s", fPath))
@@ -1293,8 +1452,8 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 
 			// Check if local file exists and already has identical MD5
 			if rem.MD5 != "" {
-				if fi, err := os.Stat(localFullPath); err == nil && !fi.IsDir() {
-					locMD5, _ := ComputeMD5(localFullPath)
+				if fi, err := s.statLocalPath(localFullPath); err == nil && !fi.IsDir() {
+					locMD5, _ := s.computeMD5LocalPath(localFullPath)
 					if locMD5 == rem.MD5 {
 						_ = s.db.UpsertFile(FileState{
 							RelPath: relName,
@@ -1316,7 +1475,12 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 					operationFailed = true
 					s.log(fmt.Sprintf("[!] Ошибка скачивания %s: %v", relName, err))
 				} else {
-					fi, _ := os.Stat(localFullPath)
+					fi, err := s.statLocalPath(localFullPath)
+					if err != nil {
+						operationFailed = true
+						s.log(fmt.Sprintf("[!] Не удалось проверить скачанный файл %s: %v", relName, err))
+						continue
+					}
 					_ = s.db.UpsertFile(FileState{
 						RelPath: relName,
 						FileID:  rem.ID,
@@ -1366,7 +1530,7 @@ func (s *SyncEngineGo) VerifyIntegrity(ctx context.Context) (int, int, []string,
 
 		st, inDB := stored[path]
 		localFullPath := s.localPathForRemote(path)
-		fi, err := os.Stat(localFullPath)
+		fi, err := s.statLocalPath(localFullPath)
 		if err != nil {
 			errorsList = append(errorsList, fmt.Sprintf("Отсутствует локально: %s", path))
 			mismatched++
@@ -1381,7 +1545,7 @@ func (s *SyncEngineGo) VerifyIntegrity(ctx context.Context) (int, int, []string,
 		if inDB && st.Size == fi.Size() && st.MTime == float64(fi.ModTime().Unix()) && st.MD5 != "" {
 			locMD5 = st.MD5
 		} else {
-			locMD5, _ = ComputeMD5(localFullPath)
+			locMD5, _ = s.computeMD5LocalPath(localFullPath)
 		}
 
 		if locMD5 == rem.MD5 {

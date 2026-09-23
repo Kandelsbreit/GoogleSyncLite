@@ -44,7 +44,7 @@
    - Самопроверка целостности байт-в-байт (кнопка *«Самопроверка MD5»*).
 
 6. **Полноценный установщик Windows**:
-   - Скомпилирован через Inno Setup: `GoogleSyncLite_Setup_v1.2.0.exe`.
+   - Скомпилирован через Inno Setup: `GoogleSyncLite_Setup_v1.2.1.exe`.
    - Создает ярлыки на Рабочем столе и в меню Пуск.
    - Опция автозапуска при старте Windows.
    - Чистое удаление через стандартную панель Windows «Установка и удаление программ».
@@ -54,7 +54,7 @@
 ## Установка и запуск
 
 ### Вариант 1. Установщик Windows (Рекомендуется)
-Скачайте и запустите `GoogleSyncLite_Setup_v1.2.0.exe` из раздела [Releases](https://github.com/Kandelsbreit/GoogleSyncLite/releases).
+Скачайте и запустите `GoogleSyncLite_Setup_v1.2.1.exe` из раздела [Releases](https://github.com/Kandelsbreit/GoogleSyncLite/releases).
 
 ### Вариант 2. Портативная версия
 Скачайте `GoogleSyncLite.exe` и положите рядом ваш файл `credentials.json`. Запустите файл.

@@ -20,16 +20,28 @@ class SyncEngine:
     def scan_local_files(self) -> Dict[str, Dict[str, Any]]:
         """Walks local folder, collects relative paths, size, and mtime."""
         local_files = {}
-        if not os.path.exists(self.local_root):
-            os.makedirs(self.local_root, exist_ok=True)
+        if (not os.path.isdir(self.local_root) or os.path.islink(self.local_root) or
+                (hasattr(os.path, 'isjunction') and os.path.isjunction(self.local_root))):
+            raise FileNotFoundError(f"Local sync directory is missing or unavailable: {self.local_root}")
 
-        for root, dirs, files in os.walk(self.local_root):
+        def raise_walk_error(error):
+            raise error
+
+        for root, dirs, files in os.walk(self.local_root, onerror=raise_walk_error):
+            if os.path.islink(root) or (hasattr(os.path, 'isjunction') and os.path.isjunction(root)):
+                raise OSError(f"Refusing to scan linked directory: {root}")
+            for name in dirs:
+                linked_dir = os.path.join(root, name)
+                if os.path.islink(linked_dir) or (hasattr(os.path, 'isjunction') and os.path.isjunction(linked_dir)):
+                    raise OSError(f"Refusing to scan linked directory: {linked_dir}")
             # Ignore temporary sync files and hidden system files
             dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
             for f in files:
                 if f.endswith('.tmp') or f.startswith('.'):
                     continue
                 full_path = os.path.join(root, f)
+                if os.path.islink(full_path):
+                    raise OSError(f"Refusing to scan linked file: {full_path}")
                 rel_path = os.path.relpath(full_path, self.local_root).replace('\\', '/')
                 try:
                     stat = os.stat(full_path)
@@ -38,8 +50,8 @@ class SyncEngine:
                         'size': stat.st_size,
                         'mtime': stat.st_mtime
                     }
-                except OSError:
-                    continue
+                except OSError as exc:
+                    raise OSError(f"Refusing to use unreadable local file: {full_path}") from exc
         return local_files
 
     def fetch_remote_tree(self) -> Dict[str, Dict[str, Any]]:

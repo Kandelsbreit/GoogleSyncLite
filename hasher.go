@@ -14,10 +14,14 @@ func ComputeMD5(filePath string) (string, error) {
 		return "", err
 	}
 	defer file.Close()
+	return computeMD5Reader(file)
+}
 
+
+func computeMD5Reader(reader io.Reader) (string, error) {
 	hasher := md5.New()
 	buf := make([]byte, 1024*1024) // 1MB buffer
-	if _, err := io.CopyBuffer(hasher, file, buf); err != nil {
+	if _, err := io.CopyBuffer(hasher, reader, buf); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil
