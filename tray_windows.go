@@ -100,13 +100,14 @@ type POINT struct {
 }
 
 type TrayManager struct {
-	hwnd   windows.Handle
-	nid    NOTIFYICONDATAW
-	onOpen func()
-	onSync func()
-	onStop func()
-	onQuit func()
-	mu     sync.Mutex
+	hwnd     windows.Handle
+	nid      NOTIFYICONDATAW
+	onOpen   func()
+	onSync   func()
+	onStop   func()
+	onQuit   func()
+	mu       sync.Mutex
+	stopOnce sync.Once
 }
 
 var globalTray *TrayManager
@@ -353,9 +354,10 @@ func (tm *TrayManager) Stop() {
 	if tm == nil || tm.hwnd == 0 {
 		return
 	}
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	procShellNotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(&tm.nid)))
-	procPostMessageW.Call(uintptr(tm.hwnd), 0x0010 /* WM_CLOSE */, 0, 0)
+	tm.stopOnce.Do(func() {
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		procShellNotifyIconW.Call(NIM_DELETE, uintptr(unsafe.Pointer(&tm.nid)))
+		procPostMessageW.Call(uintptr(tm.hwnd), 0x0010 /* WM_CLOSE */, 0, 0)
+	})
 }

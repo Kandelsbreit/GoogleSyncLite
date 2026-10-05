@@ -506,28 +506,39 @@ func (a *App) backgroundTicker() {
 				runtime.EventsEmit(a.ctx, "status-updated")
 			}
 
-			if engine, err := a.ensureEngine(ctx); err == nil {
-				a.broadcast("[*] Плановая фоновая синхронизация...")
-				summary, err := engine.Sync(ctx, cfg.DryRun, cfg.SyncMode)
-				a.syncMutex.Lock()
-				a.lastSyncTime = time.Now().Format("15:04:05")
-				if err == nil && summary != nil {
-					msg := fmt.Sprintf("[+] Готово! Проверено: %d, Загружено: %d, Скачано: %d, Удалено: %d",
-						summary.VerifiedCount, summary.UploadedCount, summary.DownloadCount, summary.DeletedCount)
-					a.lastSyncMsg = msg
-					a.broadcast(msg)
+			// Run sync in a goroutine so the defer always fires even on panic.
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				defer func() {
+					a.syncMutex.Lock()
+					a.isSyncing = false
+					a.syncCancel = nil
+					a.syncMutex.Unlock()
+					if a.ctx != nil {
+						runtime.EventsEmit(a.ctx, "status-updated")
+					}
+				}()
+
+				if engine, err := a.ensureEngine(ctx); err == nil {
+					a.broadcast("[*] Плановая фоновая синхронизация...")
+					summary, err := engine.Sync(ctx, cfg.DryRun, cfg.SyncMode)
+					a.syncMutex.Lock()
+					a.lastSyncTime = time.Now().Format("15:04:05")
+					if err == nil && summary != nil {
+						msg := fmt.Sprintf("[+] Готово! Проверено: %d, Загружено: %d, Скачано: %d, Удалено: %d",
+							summary.VerifiedCount, summary.UploadedCount, summary.DownloadCount, summary.DeletedCount)
+						a.lastSyncMsg = msg
+						a.broadcast(msg)
+					} else if err != nil {
+						msg := fmt.Sprintf("[!] Ошибка фоновой синхронизации: %v", err)
+						a.lastSyncMsg = msg
+						a.broadcast(msg)
+					}
+					a.syncMutex.Unlock()
 				}
-				a.syncMutex.Unlock()
-			}
-
-			a.syncMutex.Lock()
-			a.isSyncing = false
-			a.syncCancel = nil
-			a.syncMutex.Unlock()
-
-			if a.ctx != nil {
-				runtime.EventsEmit(a.ctx, "status-updated")
-			}
+			}()
+			<-done
 		}
 	}
 }

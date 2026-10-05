@@ -537,6 +537,20 @@ func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 str
 	filesMap := make(map[string]DriveFileMeta)
 	pageToken := ""
 
+	// Build helper maps once — outside the pagination loop (O(n), not O(n × pages))
+	storedByID := make(map[string]string, len(stored))
+	for relPath, state := range stored {
+		if state.FileID != "" {
+			storedByID[state.FileID] = relPath
+		}
+	}
+
+	// Invert foldersMap (folderID -> relPath) to resolve parent directory paths
+	idToRelFolder := make(map[string]string, len(s.foldersMap))
+	for fRel, fID := range s.foldersMap {
+		idToRelFolder[fID] = fRel
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return nil, true, ctx.Err()
@@ -557,19 +571,6 @@ func (s *SyncEngineGo) FetchRemoteDelta(ctx context.Context, lastSyncRFC3339 str
 			s.log(fmt.Sprintf("[!] Ошибка дельта-запроса (%v), переключение на полное дерево...", err))
 			tree, err := s.FetchRemoteTree(ctx)
 			return tree, false, err
-		}
-
-		storedByID := make(map[string]string, len(stored))
-		for relPath, state := range stored {
-			if state.FileID != "" {
-				storedByID[state.FileID] = relPath
-			}
-		}
-
-		// Invert foldersMap (folderID -> relPath) to resolve parent directory paths
-		idToRelFolder := make(map[string]string)
-		for fRel, fID := range s.foldersMap {
-			idToRelFolder[fID] = fRel
 		}
 
 		for _, f := range r.Files {
@@ -1068,6 +1069,21 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 			}
 		}
 
+		// Pre-flight check: in two_way mode, limit local deletions on first run
+		if syncMode == "two_way" {
+			missingLocalCount := 0
+			for p := range remoteFiles {
+				if _, hasLoc := localChanges.NewOrChanged[p]; !hasLoc {
+					if rf := remoteFiles[p]; rf.Trashed {
+						missingLocalCount++
+					}
+				}
+			}
+			if missingLocalCount > cfg.MaxDeleteThreshold {
+				return summary, fmt.Errorf("[🛡 Щит Безопасности] Первичный запуск (two_way): обнаружено %d файлов для удаления локально (порог безопасности: %d). Удаление отменено! Увеличьте порог в Настройках, если это намеренное действие.", missingLocalCount, cfg.MaxDeleteThreshold)
+			}
+		}
+
 		for path := range allPaths {
 			if ctx.Err() != nil {
 				return summary, ctx.Err()
@@ -1509,8 +1525,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 }
 
 func (s *SyncEngineGo) VerifyIntegrity(ctx context.Context) (int, int, []string, error) {
-	stored, _ := s.db.GetAllFiles()
-	localChanges, err := s.ScanLocalDelta(ctx, stored)
+	stored, err := s.db.GetAllFiles()
 	if err != nil {
 		return 0, 0, nil, err
 	}
@@ -1556,6 +1571,5 @@ func (s *SyncEngineGo) VerifyIntegrity(ctx context.Context) (int, int, []string,
 		}
 	}
 
-	_ = localChanges
 	return matched, mismatched, errorsList, nil
 }

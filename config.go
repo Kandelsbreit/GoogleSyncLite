@@ -71,7 +71,7 @@ func LoadConfig() Config {
 		}
 		appConfig = NormalizeConfig(appConfig)
 	} else {
-		SaveConfigUnsafe(appConfig)
+		saveConfigUnsafe(appConfig)
 	}
 	return appConfig
 }
@@ -87,10 +87,10 @@ func SaveConfig(cfg Config) error {
 	defer configLock.Unlock()
 	cfg = NormalizeConfig(cfg)
 	appConfig = cfg
-	return SaveConfigUnsafe(cfg)
+	return saveConfigUnsafe(cfg)
 }
 
-func SaveConfigUnsafe(cfg Config) error {
+func saveConfigUnsafe(cfg Config) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err

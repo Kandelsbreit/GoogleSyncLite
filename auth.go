@@ -119,8 +119,8 @@ func AuthenticateViaBrowser() (*oauth2.Token, error) {
 	}
 	defer listener.Close()
 
-	codeChan := make(chan string)
-	errChan := make(chan error)
+	codeChan := make(chan string, 1)
+	errChan := make(chan error, 1)
 
 	// Generate cryptographically secure state token to prevent CSRF / code injection
 	stateBytes := make([]byte, 24)
@@ -202,7 +202,7 @@ func GetDriveService(ctx context.Context) (*drive.Service, error) {
 	tokenSource := config.TokenSource(ctx, tok)
 	// Refresh check & save back if changed
 	newTok, err := tokenSource.Token()
-	if err == nil && newTok.AccessToken != tok.AccessToken {
+	if err == nil && (newTok.AccessToken != tok.AccessToken || newTok.RefreshToken != tok.RefreshToken) {
 		if err := SaveToken(newTok); err != nil {
 			return nil, fmt.Errorf("не удалось сохранить обновлённый токен: %w", err)
 		}

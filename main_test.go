@@ -249,3 +249,19 @@ func TestDownloadFileRejectsSymlinkParentBeforeNetworkRequest(t *testing.T) {
 		t.Fatalf("download must not create directories outside the root, stat error: %v", err)
 	}
 }
+
+func TestAnchorFileIsIgnored(t *testing.T) {
+	// .google_sync_anchor starts with '.' and must be filtered by IsIgnoredRelPath
+	// to prevent it from being uploaded to Google Drive.
+	if !IsIgnoredRelPath(".google_sync_anchor") {
+		t.Fatal(".google_sync_anchor must be ignored by IsIgnoredRelPath (starts with '.')")
+	}
+	// Ensure regular hidden files are also ignored
+	if !IsIgnoredRelPath(".gitignore") {
+		t.Fatal(".gitignore must be ignored by IsIgnoredRelPath")
+	}
+	// Ensure normal files are not ignored
+	if IsIgnoredRelPath("documents/report.pdf") {
+		t.Fatal("regular file must not be ignored by IsIgnoredRelPath")
+	}
+}
