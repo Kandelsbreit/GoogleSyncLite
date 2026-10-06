@@ -3,6 +3,7 @@ module googlesync
 go 1.27.1
 
 require (
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/wailsapp/wails/v2 v2.16.0
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/sys v0.48.0

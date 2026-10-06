@@ -23,6 +23,7 @@ type App struct {
 	db               *Database
 	engine           *SyncEngineGo
 	tray             *TrayManager
+	watcher          *FileWatcher
 	syncMutex        sync.Mutex
 	authMutex        sync.Mutex
 	isAuthenticating bool
@@ -38,8 +39,42 @@ func NewApp(db *Database) *App {
 	}
 }
 
+func (a *App) ensureWatcher() {
+	cfg := GetConfig()
+	if !cfg.RealtimeWatch || cfg.LocalFolder == "" {
+		if a.watcher != nil {
+			a.watcher.Stop()
+			a.watcher = nil
+		}
+		return
+	}
+
+	cleanFolder := filepath.Clean(cfg.LocalFolder)
+	if a.watcher != nil {
+		if a.watcher.localRoot == cleanFolder {
+			return
+		}
+		a.watcher.Stop()
+		a.watcher = nil
+	}
+
+	w, err := NewFileWatcher(cleanFolder, func() {
+		if IsAuthenticated() {
+			_ = a.TriggerSync()
+		}
+	}, func(msg string) {
+		a.broadcast(msg)
+	})
+	if err == nil {
+		a.watcher = w
+	} else {
+		a.broadcast(fmt.Sprintf("[!] Не удалось запустить мониторинг файлов: %v", err))
+	}
+}
+
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.ensureWatcher()
 
 	// Start background ticker for periodic sync
 	go a.backgroundTicker()
@@ -70,6 +105,11 @@ func (a *App) shutdown(ctx context.Context) {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+
+	if a.watcher != nil {
+		a.watcher.Stop()
+		a.watcher = nil
 	}
 
 	if a.tray != nil {
@@ -109,16 +149,42 @@ func (a *App) ensureEngine(ctx context.Context) (*SyncEngineGo, error) {
 	return a.engine, nil
 }
 
+func (a *App) updateSyncResult(timeStr, msg string) {
+	a.syncMutex.Lock()
+	if timeStr != "" {
+		a.lastSyncTime = timeStr
+		if a.db != nil {
+			_ = a.db.SetMeta("last_sync_display", timeStr)
+		}
+	}
+	if msg != "" {
+		a.lastSyncMsg = msg
+		if a.db != nil {
+			_ = a.db.SetMeta("last_sync_msg", msg)
+		}
+	}
+	a.syncMutex.Unlock()
+}
+
 func (a *App) GetStatus() map[string]interface{} {
 	a.syncMutex.Lock()
 	defer a.syncMutex.Unlock()
+
+	lastTime := a.lastSyncTime
+	lastMsg := a.lastSyncMsg
+	if lastTime == "" && a.db != nil {
+		lastTime = a.db.GetMeta("last_sync_display")
+	}
+	if lastMsg == "" && a.db != nil {
+		lastMsg = a.db.GetMeta("last_sync_msg")
+	}
 
 	return map[string]interface{}{
 		"authenticated":  IsAuthenticated(),
 		"config":         GetConfig(),
 		"is_syncing":     a.isSyncing,
-		"last_sync_time": a.lastSyncTime,
-		"last_sync_msg":  a.lastSyncMsg,
+		"last_sync_time": lastTime,
+		"last_sync_msg":  lastMsg,
 	}
 }
 
@@ -186,9 +252,7 @@ func (a *App) TriggerSync() error {
 		if err != nil {
 			msg := fmt.Sprintf("[!] Ошибка подключения к Google Drive: %v", err)
 			a.broadcast(msg)
-			a.syncMutex.Lock()
-			a.lastSyncMsg = msg
-			a.syncMutex.Unlock()
+			a.updateSyncResult("", msg)
 			return
 		}
 
@@ -196,25 +260,20 @@ func (a *App) TriggerSync() error {
 		a.broadcast("[*] Запуск процедуры синхронизации файлов...")
 		summary, err := engine.Sync(ctx, cfg.DryRun, cfg.SyncMode)
 
-		a.syncMutex.Lock()
-		a.lastSyncTime = time.Now().Format("15:04:05")
 		if err != nil {
 			if ctx.Err() != nil {
 				msg := "[!] Синхронизация остановлена пользователем."
-				a.lastSyncMsg = msg
-				a.syncMutex.Unlock()
+				a.updateSyncResult(time.Now().Format("15:04:05"), msg)
 				a.broadcast(msg)
 			} else {
 				msg := fmt.Sprintf("[!] Ошибка синхронизации: %v", err)
-				a.lastSyncMsg = msg
-				a.syncMutex.Unlock()
+				a.updateSyncResult("", msg)
 				a.broadcast(msg)
 			}
 		} else {
 			msg := fmt.Sprintf("[+] Готово! Проверено: %d, Загружено: %d, Скачано: %d, Удалено: %d",
 				summary.VerifiedCount, summary.UploadedCount, summary.DownloadCount, summary.DeletedCount)
-			a.lastSyncMsg = msg
-			a.syncMutex.Unlock()
+			a.updateSyncResult(time.Now().Format("15:04:05"), msg)
 			a.broadcast(msg)
 		}
 	}()
@@ -435,6 +494,7 @@ func (a *App) SaveSettings(cfg Config) error {
 	a.syncMutex.Lock()
 	a.engine = nil // Reset engine so it picks up updated folders
 	a.syncMutex.Unlock()
+	a.ensureWatcher()
 
 	a.broadcast("[+] Настройки синхронизации успешно сохранены.")
 	if a.ctx != nil {
@@ -523,19 +583,16 @@ func (a *App) backgroundTicker() {
 				if engine, err := a.ensureEngine(ctx); err == nil {
 					a.broadcast("[*] Плановая фоновая синхронизация...")
 					summary, err := engine.Sync(ctx, cfg.DryRun, cfg.SyncMode)
-					a.syncMutex.Lock()
-					a.lastSyncTime = time.Now().Format("15:04:05")
 					if err == nil && summary != nil {
 						msg := fmt.Sprintf("[+] Готово! Проверено: %d, Загружено: %d, Скачано: %d, Удалено: %d",
 							summary.VerifiedCount, summary.UploadedCount, summary.DownloadCount, summary.DeletedCount)
-						a.lastSyncMsg = msg
+						a.updateSyncResult(time.Now().Format("15:04:05"), msg)
 						a.broadcast(msg)
 					} else if err != nil {
 						msg := fmt.Sprintf("[!] Ошибка фоновой синхронизации: %v", err)
-						a.lastSyncMsg = msg
+						a.updateSyncResult("", msg)
 						a.broadcast(msg)
 					}
-					a.syncMutex.Unlock()
 				}
 			}()
 			<-done

@@ -21,7 +21,7 @@
         </div>
         <span>Google Sync Lite</span>
       </div>
-      <span class="version-tag">v1.2.0</span>
+      <span class="version-tag">v1.3.0</span>
       <div class="safety-pill">
         <span class="safety-dot"></span>
         <span>ЩИТ БЕЗОПАСНОСТИ: АКТИВЕН</span>
@@ -241,6 +241,17 @@
             </div>
             <label class="switch">
               <input type="checkbox" id="cfgAutostart" onchange="toggleAutostart(this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="switch-row" style="margin-top: 14px;">
+            <div class="switch-label-wrap">
+              <span class="switch-title">Мгновенное отслеживание изменений (Real-time Watcher)</span>
+              <span class="switch-desc">Автоматически обнаруживает новые и измененные файлы за 2 секунды без повторного сканирования диска.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="cfgRealtimeWatch" checked>
               <span class="slider"></span>
             </label>
           </div>

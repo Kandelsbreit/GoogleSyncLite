@@ -127,6 +127,11 @@ async function loadStatus() {
         elAutostart.checked = !!cfg.autostart;
       }
 
+      const elWatch = document.getElementById('cfgRealtimeWatch');
+      if (elWatch && elWatch !== activeEl) {
+        elWatch.checked = cfg.realtime_watch !== false;
+      }
+
       setValIfNotFocused('cfgInterval', Math.max(1, Math.floor((cfg.sync_interval_seconds || 60) / 60)));
 
       const elDel = document.getElementById('cfgAllowRemoteDeletion');
@@ -368,6 +373,7 @@ async function saveSettings() {
     remote_folder_id: document.getElementById('cfgRemoteFolder').value.trim() || 'root',
     sync_interval_seconds: intervalMin * 60,
     autostart: document.getElementById('cfgAutostart').checked,
+    realtime_watch: document.getElementById('cfgRealtimeWatch').checked,
     sync_mode: currentSyncMode,
     safety_shield: true,
     allow_remote_deletion: document.getElementById('cfgAllowRemoteDeletion').checked,

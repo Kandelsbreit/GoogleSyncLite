@@ -16,6 +16,7 @@ type Config struct {
 	SafetyShield        bool   `json:"safety_shield"`
 	AllowRemoteDeletion bool   `json:"allow_remote_deletion"`
 	MaxDeleteThreshold  int    `json:"max_delete_threshold"`
+	RealtimeWatch       bool   `json:"realtime_watch"`
 }
 
 func NormalizeConfig(cfg Config) Config {
@@ -61,13 +62,19 @@ func LoadConfig() Config {
 		SafetyShield:        true,
 		AllowRemoteDeletion: false,
 		MaxDeleteThreshold:  20,
+		RealtimeWatch:       true,
 	}
 
 	data, err := os.ReadFile(cfgPath)
 	if err == nil {
+		rawMap := make(map[string]json.RawMessage)
+		_ = json.Unmarshal(data, &rawMap)
 		if unmarshalErr := json.Unmarshal(data, &appConfig); unmarshalErr != nil {
 			// Backup corrupted config so user settings aren't lost silently
 			_ = os.WriteFile(cfgPath+".bak", data, 0644)
+		}
+		if _, hasWatch := rawMap["realtime_watch"]; !hasWatch {
+			appConfig.RealtimeWatch = true
 		}
 		appConfig = NormalizeConfig(appConfig)
 	} else {

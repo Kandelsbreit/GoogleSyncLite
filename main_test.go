@@ -265,3 +265,87 @@ func TestAnchorFileIsIgnored(t *testing.T) {
 		t.Fatal("regular file must not be ignored by IsIgnoredRelPath")
 	}
 }
+
+func TestStatusPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	db, err := OpenDatabase(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.SetMeta("last_sync_display", "15:42:00"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetMeta("last_sync_msg", "Готово! Все файлы защищены"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := db.GetMeta("last_sync_display"); got != "15:42:00" {
+		t.Fatalf("expected 15:42:00, got %s", got)
+	}
+	if got := db.GetMeta("last_sync_msg"); got != "Готово! Все файлы защищены" {
+		t.Fatalf("expected 'Готово! Все файлы защищены', got %s", got)
+	}
+}
+
+func TestFileWatcherFilters(t *testing.T) {
+	tmpDir := t.TempDir()
+	var triggered bool
+	fw, err := NewFileWatcher(tmpDir, func() {
+		triggered = true
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Stop()
+
+	// Verify ignored paths filter
+	if !fw.isIgnoredPath(filepath.Join(tmpDir, ".google_sync_anchor")) {
+		t.Fatal("expected anchor to be ignored")
+	}
+	if !fw.isIgnoredPath(filepath.Join(tmpDir, "test.tmp")) {
+		t.Fatal("expected .tmp to be ignored")
+	}
+	if !fw.isIgnoredPath(filepath.Join(tmpDir, "~$document.docx")) {
+		t.Fatal("expected ~$ to be ignored")
+	}
+	if !fw.isIgnoredPath(filepath.Join(tmpDir, "Thumbs.db")) {
+		t.Fatal("expected Thumbs.db to be ignored")
+	}
+	if fw.isIgnoredPath(filepath.Join(tmpDir, "important_file.dat")) {
+		t.Fatal("expected regular file to NOT be ignored")
+	}
+	_ = triggered
+}
+
+func TestScanLocalDeltaOptimized(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "sub")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	f1 := filepath.Join(tmpDir, "f1.txt")
+	f2 := filepath.Join(subDir, "f2.txt")
+	_ = os.WriteFile(f1, []byte("data1"), 0644)
+	_ = os.WriteFile(f2, []byte("data2"), 0644)
+
+	dbDir := t.TempDir()
+	db, err := OpenDatabase(filepath.Join(dbDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	engine := NewSyncEngineGo(nil, db, tmpDir, "root", nil)
+	changes, err := engine.ScanLocalDelta(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ScanLocalDelta error: %v", err)
+	}
+
+	if len(changes.NewOrChanged) != 2 {
+		t.Fatalf("expected 2 new files, got %d", len(changes.NewOrChanged))
+	}
+}
+

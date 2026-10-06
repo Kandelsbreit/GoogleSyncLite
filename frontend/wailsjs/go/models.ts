@@ -10,6 +10,7 @@ export namespace main {
 	    safety_shield: boolean;
 	    allow_remote_deletion: boolean;
 	    max_delete_threshold: number;
+	    realtime_watch: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -26,6 +27,7 @@ export namespace main {
 	        this.safety_shield = source["safety_shield"];
 	        this.allow_remote_deletion = source["allow_remote_deletion"];
 	        this.max_delete_threshold = source["max_delete_threshold"];
+	        this.realtime_watch = source["realtime_watch"];
 	    }
 	}
 	export class FolderItem {

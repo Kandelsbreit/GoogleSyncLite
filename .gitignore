@@ -32,3 +32,5 @@ __pycache__/
 *.pyc
 build/bin/
 *.spec
+.codegraph/
+.trace-mcp/

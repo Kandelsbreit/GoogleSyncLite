@@ -268,40 +268,40 @@ func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]Fil
 	count := 0
 	lastReport := time.Now()
 
-	err = fs.WalkDir(rootedLocalFS{root: root}, ".", func(path string, _ fs.DirEntry, err error) error {
+	err = fs.WalkDir(rootedLocalFS{root: root}, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("неполное сканирование: не удалось прочитать '%s': %w", path, err)
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		cleanRel := path
-		rootedRel := filepath.FromSlash(cleanRel)
-		entryInfo, err := root.Lstat(rootedRel)
-		if err != nil {
-			return fmt.Errorf("не удалось безопасно проверить '%s': %w", path, err)
-		}
-		if entryInfo.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("синхронизация остановлена: обнаружена символическая ссылка или reparse point '%s'", path)
-		}
-		info, err := root.Stat(rootedRel)
-		if err != nil {
-			return fmt.Errorf("не удалось безопасно проверить '%s': %w", path, err)
-		}
-		if path != "." && !info.IsDir() && !entryInfo.Mode().IsRegular() {
-			return fmt.Errorf("синхронизация остановлена: неподдерживаемый тип файла '%s'", path)
+		if path == "." {
+			return nil
 		}
 
-		if info.IsDir() {
-			name := info.Name()
-			if path != "." && (strings.HasPrefix(name, ".") || name == "__pycache__" || name == "$RECYCLE.BIN" || name == "System Volume Information") {
+		name := d.Name()
+		if d.IsDir() {
+			if strings.HasPrefix(name, ".") || name == "__pycache__" || name == "$RECYCLE.BIN" || name == "System Volume Information" || name == "node_modules" {
 				return fs.SkipDir
 			}
 			return nil
 		}
 
+		cleanRel := filepath.ToSlash(path)
 		if IsIgnoredRelPath(cleanRel) {
 			return nil
+		}
+
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("синхронизация остановлена: обнаружена символическая ссылка или reparse point '%s'", path)
+		}
+		if !d.Type().IsRegular() {
+			return fmt.Errorf("синхронизация остановлена: неподдерживаемый тип файла '%s'", path)
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return fmt.Errorf("не удалось безопасно проверить '%s': %w", path, err)
 		}
 
 		seenPaths[cleanRel] = true
@@ -310,7 +310,7 @@ func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]Fil
 		fileSize := info.Size()
 
 		count++
-		if count%10000 == 0 || time.Since(lastReport) > 2*time.Second {
+		if count%25000 == 0 || (count%5000 == 0 && time.Since(lastReport) > 2*time.Second) {
 			s.log(fmt.Sprintf("    Просканировано локально: %d файлов...", count))
 			lastReport = time.Now()
 		}
@@ -839,8 +839,31 @@ func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, 
 	return nil
 }
 
+func isAuthOrTokenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	if strings.Contains(errStr, "invalid_grant") ||
+		strings.Contains(errStr, "token has been expired or revoked") ||
+		strings.Contains(errStr, "oauth2: cannot fetch token") ||
+		strings.Contains(errStr, "statuscode: 401") ||
+		strings.Contains(errStr, "statuscode: 400") && strings.Contains(errStr, "invalid_grant") {
+		return true
+	}
+	if gErr, ok := err.(*googleapi.Error); ok {
+		if gErr.Code == 401 {
+			return true
+		}
+	}
+	return false
+}
+
 func isRetryableError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if isAuthOrTokenError(err) {
 		return false
 	}
 	if gErr, ok := err.(*googleapi.Error); ok {
@@ -1322,6 +1345,9 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 			if !dryRun {
 				res, err := s.UpdateFile(ctx, st.FileID, localFullPath)
 				if err != nil {
+					if isAuthOrTokenError(err) {
+						return summary, fmt.Errorf("авторизация Google недействительна (токен отозван или истек). Нажмите «Вход Google Drive» в окне приложения")
+					}
 					// Self-healing: if file in cloud was deleted/missing (404), clear stale FileID and upload fresh
 					if gErr, ok := err.(*googleapi.Error); ok && gErr.Code == 404 {
 						s.log(fmt.Sprintf("[*] Файл %s отсутствует в облаке (404 Not Found). Сброс ID и повторная загрузка...", path))
@@ -1377,6 +1403,9 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 			if !dryRun {
 				parentID, err := s.EnsureRemoteFolder(ctx, pathPkg.Dir(path))
 				if err != nil {
+					if isAuthOrTokenError(err) {
+						return summary, fmt.Errorf("авторизация Google недействительна (токен отозван или истек). Нажмите «Вход Google Drive» в окне приложения")
+					}
 					operationFailed = true
 					s.log(fmt.Sprintf("[!] Ошибка создания папки для %s: %v", path, err))
 				} else {
@@ -1386,6 +1415,9 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 					escapedFile = strings.ReplaceAll(escapedFile, "'", "\\'")
 					qFile := fmt.Sprintf("'%s' in parents and name = '%s' and trashed = false", parentID, escapedFile)
 					listRes, errList := s.srv.Files.List().Q(qFile).Spaces("drive").Fields("files(id, md5Checksum)").PageSize(1).Context(ctx).Do()
+					if errList != nil && isAuthOrTokenError(errList) {
+						return summary, fmt.Errorf("авторизация Google недействительна (токен отозван или истек). Нажмите «Вход Google Drive» в окне приложения")
+					}
 					if errList == nil && len(listRes.Files) > 0 {
 						// Existing file in cloud -> update or register it!
 						existID := listRes.Files[0].Id
@@ -1402,6 +1434,9 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 						} else {
 							res, err := s.UpdateFile(ctx, existID, localFullPath)
 							if err != nil {
+								if isAuthOrTokenError(err) {
+									return summary, fmt.Errorf("авторизация Google недействительна (токен отозван или истек). Нажмите «Вход Google Drive» в окне приложения")
+								}
 								operationFailed = true
 								s.log(fmt.Sprintf("[!] Ошибка обновления существующего файла %s в Google Drive: %v", path, err))
 							} else {
@@ -1423,6 +1458,9 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 						// New upload
 						res, err := s.UploadFile(ctx, localFullPath, parentID, fileName)
 						if err != nil {
+							if isAuthOrTokenError(err) {
+								return summary, fmt.Errorf("авторизация Google недействительна (токен отозван или истек). Нажмите «Вход Google Drive» в окне приложения")
+							}
 							operationFailed = true
 							s.log(fmt.Sprintf("[!] Ошибка загрузки нового файла %s в Google Drive: %v", path, err))
 						} else {
