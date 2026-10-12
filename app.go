@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,22 @@ import (
 type FolderItem struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+type ShareLinkResult struct {
+	URL      string `json:"url"`
+	FileID   string `json:"file_id"`
+	IsPublic bool   `json:"is_public"`
+	Message  string `json:"message"`
+}
+
+type FileRevisionItem struct {
+	ID              string `json:"id"`
+	ModifiedTime    string `json:"modified_time"`
+	ModifiedTimeAgo string `json:"modified_time_ago"`
+	Size            int64  `json:"size"`
+	SizeFormatted   string `json:"size_formatted"`
+	KeepForever     bool   `json:"keep_forever"`
 }
 
 type App struct {
@@ -630,11 +647,9 @@ func (a *App) OpenLocalFile(relPath string) error {
 
 func (a *App) GetFileDriveURL(relPath string) (string, error) {
 	if a.db != nil {
-		files, err := a.db.GetAllFiles()
-		if err == nil {
-			if st, ok := files[relPath]; ok && st.FileID != "" {
-				return fmt.Sprintf("https://drive.google.com/file/d/%s/view", st.FileID), nil
-			}
+		st, err := a.db.GetFile(relPath)
+		if err == nil && st != nil && st.FileID != "" {
+			return fmt.Sprintf("https://drive.google.com/file/d/%s/view", st.FileID), nil
 		}
 	}
 	cfg := GetConfig()
@@ -642,6 +657,184 @@ func (a *App) GetFileDriveURL(relPath string) (string, error) {
 		return fmt.Sprintf("https://drive.google.com/drive/folders/%s", cfg.RemoteFolderID), nil
 	}
 	return "https://drive.google.com/drive/my-drive", nil
+}
+
+func (a *App) CreateShareLink(relPath string, makePublic bool) (*ShareLinkResult, error) {
+	if a.db == nil {
+		return nil, fmt.Errorf("база данных недоступна")
+	}
+	st, err := a.db.GetFile(relPath)
+	if err != nil || st == nil || st.FileID == "" {
+		return nil, fmt.Errorf("файл '%s' еще не синхронизирован с Google Диском", relPath)
+	}
+
+	ctx := context.Background()
+	srv, err := GetDriveService(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка доступа к Google Диску: %w", err)
+	}
+
+	if makePublic {
+		perm := &drive.Permission{
+			Role: "reader",
+			Type: "anyone",
+		}
+		_, _ = srv.Permissions.Create(st.FileID, perm).Context(ctx).Do()
+	}
+
+	f, err := srv.Files.Get(st.FileID).Fields("id, name, webViewLink").Context(ctx).Do()
+	shareURL := fmt.Sprintf("https://drive.google.com/file/d/%s/view?usp=sharing", st.FileID)
+	if err == nil && f != nil && f.WebViewLink != "" {
+		shareURL = f.WebViewLink
+	}
+
+	if a.ctx != nil {
+		_ = runtime.ClipboardSetText(a.ctx, shareURL)
+	}
+
+	msg := fmt.Sprintf("[+] Ссылка на '%s' скопирована в буфер обмена: %s", filepath.Base(relPath), shareURL)
+	a.broadcast(msg)
+
+	return &ShareLinkResult{
+		URL:      shareURL,
+		FileID:   st.FileID,
+		IsPublic: makePublic,
+		Message:  "Ссылка скопирована в буфер обмена!",
+	}, nil
+}
+
+func (a *App) GetFileRevisions(relPath string) ([]FileRevisionItem, error) {
+	if a.db == nil {
+		return nil, fmt.Errorf("база данных недоступна")
+	}
+	st, err := a.db.GetFile(relPath)
+	if err != nil || st == nil || st.FileID == "" {
+		return nil, fmt.Errorf("файл '%s' не найден в Google Диске", relPath)
+	}
+
+	ctx := context.Background()
+	srv, err := GetDriveService(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("требуется авторизация в Google Drive")
+	}
+
+	revCall, err := srv.Revisions.List(st.FileID).Fields("revisions(id, modifiedTime, size, originalFilename, keepForever)").Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("не удалось получить версии файла: %w", err)
+	}
+
+	var items []FileRevisionItem
+	for i := len(revCall.Revisions) - 1; i >= 0; i-- {
+		r := revCall.Revisions[i]
+		modTimeStr := r.ModifiedTime
+		agoStr := ""
+		if t, err := time.Parse(time.RFC3339, r.ModifiedTime); err == nil {
+			modTimeStr = t.Local().Format("02.01.2006 15:04:05")
+			agoStr = FormatTimeAgo(t)
+		}
+		items = append(items, FileRevisionItem{
+			ID:              r.Id,
+			ModifiedTime:    modTimeStr,
+			ModifiedTimeAgo: agoStr,
+			Size:            r.Size,
+			SizeFormatted:   FormatBytes(r.Size),
+			KeepForever:     r.KeepForever,
+		})
+	}
+
+	return items, nil
+}
+
+func (a *App) RestoreFileRevision(relPath, revisionID string) error {
+	if a.db == nil {
+		return fmt.Errorf("база данных недоступна")
+	}
+	st, err := a.db.GetFile(relPath)
+	if err != nil || st == nil || st.FileID == "" {
+		return fmt.Errorf("файл '%s' не найден в базе данных", relPath)
+	}
+
+	ctx := context.Background()
+	srv, err := GetDriveService(ctx)
+	if err != nil {
+		return fmt.Errorf("требуется авторизация в Google Drive")
+	}
+
+	cfg := GetConfig()
+	localFullPath := filepath.Join(cfg.LocalFolder, filepath.FromSlash(relPath))
+
+	resp, err := srv.Revisions.Get(st.FileID, revisionID).Context(ctx).Download()
+	if err != nil {
+		return fmt.Errorf("ошибка скачивания версии из Google Drive: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := os.MkdirAll(filepath.Dir(localFullPath), 0755); err != nil {
+		return fmt.Errorf("ошибка создания каталога: %w", err)
+	}
+
+	tmpFile := localFullPath + ".tmp_restore"
+	out, err := os.Create(tmpFile)
+	if err != nil {
+		return fmt.Errorf("ошибка создания временного файла: %w", err)
+	}
+
+	written, err := io.Copy(out, resp.Body)
+	_ = out.Close()
+	if err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("ошибка записи файла: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, localFullPath); err != nil {
+		_ = os.Remove(localFullPath)
+		if err2 := os.Rename(tmpFile, localFullPath); err2 != nil {
+			return fmt.Errorf("ошибка сохранения файла: %w", err2)
+		}
+	}
+
+	hash, _ := ComputeMD5(localFullPath)
+	fi, _ := os.Stat(localFullPath)
+	var mtime float64
+	if fi != nil {
+		mtime = float64(fi.ModTime().UnixNano()) / 1e9
+	}
+
+	_ = a.db.UpsertFile(FileState{
+		RelPath:      relPath,
+		FileID:       st.FileID,
+		MD5:          hash,
+		MTime:        mtime,
+		Size:         written,
+		IsDir:        false,
+		LastSyncedAt: float64(time.Now().Unix()),
+	})
+
+	_ = a.db.AddRecentFile(relPath, "restore", written)
+	msg := fmt.Sprintf("[✓] Версия файла '%s' успешно восстановлена из облака (Размер: %s, Ревизия: %s)", filepath.Base(relPath), FormatBytes(written), revisionID)
+	a.broadcast(msg)
+
+	return nil
+}
+
+func (a *App) EmptyDriveTrash() error {
+	ctx := context.Background()
+	srv, err := GetDriveService(ctx)
+	if err != nil {
+		return fmt.Errorf("требуется авторизация в Google Drive")
+	}
+
+	a.broadcast("[*] Очистка Корзины Google Диска...")
+	if err := srv.Files.EmptyTrash().Context(ctx).Do(); err != nil {
+		a.broadcast(fmt.Sprintf("[!] Ошибка очистки корзины: %v", err))
+		return err
+	}
+
+	a.broadcast("[✓] Корзина Google Диска успешно очищена!")
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "status-updated")
+	}
+	return nil
 }
 
 func (a *App) OpenInGoogleDrive(relPath string) error {

@@ -10,6 +10,14 @@ export function CreateDriveFolder(arg1, arg2) {
   return window['go']['main']['App']['CreateDriveFolder'](arg1, arg2);
 }
 
+export function CreateShareLink(arg1, arg2) {
+  return window['go']['main']['App']['CreateShareLink'](arg1, arg2);
+}
+
+export function EmptyDriveTrash() {
+  return window['go']['main']['App']['EmptyDriveTrash']();
+}
+
 export function GetAccountStorageInfo() {
   return window['go']['main']['App']['GetAccountStorageInfo']();
 }
@@ -22,12 +30,24 @@ export function GetFileDriveURL(arg1) {
   return window['go']['main']['App']['GetFileDriveURL'](arg1);
 }
 
+export function GetFileRevisions(arg1) {
+  return window['go']['main']['App']['GetFileRevisions'](arg1);
+}
+
+export function GetLocalSubfolders() {
+  return window['go']['main']['App']['GetLocalSubfolders']();
+}
+
 export function GetRecentFiles() {
   return window['go']['main']['App']['GetRecentFiles']();
 }
 
 export function GetStatus() {
   return window['go']['main']['App']['GetStatus']();
+}
+
+export function GetStorageBreakdown() {
+  return window['go']['main']['App']['GetStorageBreakdown']();
 }
 
 export function HideToTray() {
@@ -66,12 +86,20 @@ export function Quit() {
   return window['go']['main']['App']['Quit']();
 }
 
+export function RestoreFileRevision(arg1, arg2) {
+  return window['go']['main']['App']['RestoreFileRevision'](arg1, arg2);
+}
+
 export function ResumeSync() {
   return window['go']['main']['App']['ResumeSync']();
 }
 
 export function SaveSettings(arg1) {
   return window['go']['main']['App']['SaveSettings'](arg1);
+}
+
+export function SearchFiles(arg1, arg2) {
+  return window['go']['main']['App']['SearchFiles'](arg1, arg2);
 }
 
 export function SetTray(arg1) {

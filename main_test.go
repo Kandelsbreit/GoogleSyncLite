@@ -820,6 +820,79 @@ func TestSearchFilesAndStorageBreakdown(t *testing.T) {
 	}
 }
 
+func TestDatabaseGetFileAndFormatTimeAgo(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test_getfile.db")
+	db, err := OpenDatabase(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// 1. GetFile on non-existent file
+	f, err := db.GetFile("missing.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f != nil {
+		t.Fatalf("expected nil for missing file, got %+v", f)
+	}
+
+	// 2. Insert and GetFile
+	st := FileState{
+		RelPath: "docs/doc.pdf",
+		FileID:  "drive_doc_123",
+		MD5:     "abc123",
+		MTime:   1700000000,
+		Size:    4096,
+		IsDir:   false,
+	}
+	if err := db.UpsertFile(st); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err = db.GetFile("docs/doc.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f == nil || f.FileID != "drive_doc_123" || f.Size != 4096 {
+		t.Fatalf("unexpected file state: %+v", f)
+	}
+
+	// 3. Test FormatTimeAgo
+	now := time.Now()
+	if FormatTimeAgo(now.Add(-10*time.Second)) != "только что" {
+		t.Errorf("unexpected time ago: %s", FormatTimeAgo(now.Add(-10*time.Second)))
+	}
+	if FormatTimeAgo(now.Add(-15*time.Minute)) != "15 мин. назад" {
+		t.Errorf("unexpected time ago: %s", FormatTimeAgo(now.Add(-15*time.Minute)))
+	}
+	if FormatTimeAgo(now.Add(-3*time.Hour)) != "3 ч. назад" {
+		t.Errorf("unexpected time ago: %s", FormatTimeAgo(now.Add(-3*time.Hour)))
+	}
+
+	// 4. Test App helper validation
+	app := NewApp(db)
+	url, err := app.GetFileDriveURL("docs/doc.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if url != "https://drive.google.com/file/d/drive_doc_123/view" {
+		t.Fatalf("unexpected drive URL: %s", url)
+	}
+
+	// Missing file for sharing
+	_, err = app.CreateShareLink("nonexistent.txt", true)
+	if err == nil {
+		t.Fatal("expected error for non-existent file share link")
+	}
+
+	// Missing file for revisions
+	_, err = app.GetFileRevisions("nonexistent.txt")
+	if err == nil {
+		t.Fatal("expected error for non-existent file revisions")
+	}
+}
+
 
 
 

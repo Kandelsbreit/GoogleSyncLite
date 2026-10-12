@@ -762,10 +762,11 @@ async function loadRecentFiles() {
         <button class="recent-file-btn" onclick="openLocalFile('${safeJsRel}')" title="Показать в проводнике Windows">📂</button>
       `;
 
-      if (it.drive_link) {
+      if (it.drive_link && it.action !== 'delete') {
         actionsHtml += `
           <button class="recent-file-btn" onclick="openInDrive('${safeJsRel}')" title="Открыть в Google Диске (в браузере)">↗</button>
-          <button class="recent-file-btn" onclick="copyDriveUrl('${safeDriveLink}')" title="Скопировать ссылку на файл в Google Диске">🔗</button>
+          <button class="recent-file-btn" onclick="shareFileLink('${safeJsRel}')" title="Создать ссылку для доступа и скопировать">🔗</button>
+          <button class="recent-file-btn" onclick="openFileRevisions('${safeJsRel}')" title="История версий">🕒</button>
         `;
       }
 
@@ -897,10 +898,11 @@ async function searchFiles(query) {
         <button class="recent-file-btn" onclick="openLocalFile('${safeJsRel}')" title="Показать в проводнике Windows">📂</button>
       `;
 
-      if (it.drive_link) {
+      if (it.drive_link && !it.is_dir) {
         actionsHtml += `
           <button class="recent-file-btn" onclick="openInDrive('${safeJsRel}')" title="Открыть в Google Диске (в браузере)">↗</button>
-          <button class="recent-file-btn" onclick="copyDriveUrl('${safeDriveLink}')" title="Скопировать ссылку на файл">🔗</button>
+          <button class="recent-file-btn" onclick="shareFileLink('${safeJsRel}')" title="Создать ссылку для доступа и скопировать">🔗</button>
+          <button class="recent-file-btn" onclick="openFileRevisions('${safeJsRel}')" title="История версий">🕒</button>
         `;
       }
 
@@ -1028,4 +1030,118 @@ function toggleFolderExclusion(folderName, isChecked) {
     }
   }
 }
+
+// --- Phase 6: Share Links, File Revisions & Cloud Trash Cleaner ---
+
+// Share File Link Handler
+async function shareFileLink(relPath) {
+  if (!window.go || !window.go.main || !window.go.main.App || !window.go.main.App.CreateShareLink) return;
+  try {
+    showToast('Создание ссылки общего доступа...');
+    const res = await window.go.main.App.CreateShareLink(relPath, true);
+    if (res && res.url) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(res.url);
+      }
+      showToast('🔗 Ссылка скопирована в буфер обмена!');
+    }
+  } catch (err) {
+    appendLog(`[!] Ошибка создания ссылки: ${err}`);
+    showToast(`Ошибка: ${err}`);
+  }
+}
+
+// Revisions Modal Handlers
+let currentRevisionRelPath = '';
+
+async function openFileRevisions(relPath) {
+  currentRevisionRelPath = relPath;
+  const modal = document.getElementById('revisionsModal');
+  const pathLabel = document.getElementById('revisionsFileRelPath');
+  const listEl = document.getElementById('revisionsList');
+  if (!modal || !listEl) return;
+
+  if (pathLabel) pathLabel.textContent = relPath;
+  listEl.innerHTML = '<div style="padding: 24px; text-align: center; color: var(--text-muted);">Загрузка истории версий из Google Диска...</div>';
+  modal.classList.add('active');
+
+  try {
+    const revisions = await window.go.main.App.GetFileRevisions(relPath);
+    if (!revisions || revisions.length === 0) {
+      listEl.innerHTML = '<div style="padding: 24px; text-align: center; color: var(--text-muted);">У данного файла пока нет истории версий.</div>';
+      return;
+    }
+
+    let html = '';
+    revisions.forEach((rev, idx) => {
+      const isCurrent = idx === 0;
+      const safeJsRel = relPath.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const safeJsRevId = rev.id.replace(/'/g, "\\'");
+
+      html += `
+        <div class="revision-item">
+          <div class="revision-left">
+            <div class="revision-header">
+              <span class="revision-date">${escapeHtml(rev.modified_time || '')}</span>
+              ${isCurrent ? '<span class="revision-badge-current">Текущая версия</span>' : ''}
+              ${rev.modified_time_ago ? `<span class="revision-ago">(${escapeHtml(rev.modified_time_ago)})</span>` : ''}
+            </div>
+            <div class="revision-meta">
+              <span>Размер: ${escapeHtml(rev.size_formatted || '0 Б')}</span>
+              <span>ID: ${escapeHtml(rev.id)}</span>
+            </div>
+          </div>
+          <div class="revision-right">
+            ${isCurrent ? '' : `
+              <button class="btn btn-sm btn-primary" onclick="restoreFileRevision('${safeJsRel}', '${safeJsRevId}')" title="Восстановить эту версию файла">
+                ↺ Восстановить
+              </button>
+            `}
+          </div>
+        </div>
+      `;
+    });
+    listEl.innerHTML = html;
+  } catch (err) {
+    listEl.innerHTML = `<div style="padding: 16px; color: var(--accent-red); font-size: 12px; text-align: center;">${escapeHtml(String(err))}</div>`;
+  }
+}
+
+function closeRevisionsModal() {
+  const modal = document.getElementById('revisionsModal');
+  if (modal) modal.classList.remove('active');
+}
+
+async function restoreFileRevision(relPath, revisionId) {
+  if (!confirm(`Вы действительно хотите восстановить выбранную версию файла '${relPath}'? Текущий локальный файл будет заменен.`)) {
+    return;
+  }
+  try {
+    showToast('Восстановление версии...');
+    await window.go.main.App.RestoreFileRevision(relPath, revisionId);
+    showToast('✓ Версия успешно восстановлена!');
+    closeRevisionsModal();
+    loadRecentFiles();
+  } catch (err) {
+    appendLog(`[!] Ошибка восстановления версии: ${err}`);
+    showToast(`Ошибка: ${err}`);
+  }
+}
+
+// Empty Cloud Trash Handler
+async function emptyDriveTrash() {
+  if (!confirm('Вы действительно хотите навсегда очистить Корзину Google Диска? Это освободит место в хранилище.')) {
+    return;
+  }
+  try {
+    showToast('Очистка Корзины...');
+    await window.go.main.App.EmptyDriveTrash();
+    showToast('🗑 Корзина Google Диска успешно очищена!');
+    loadStorageQuota();
+  } catch (err) {
+    appendLog(`[!] Ошибка очистки корзины: ${err}`);
+    showToast(`Ошибка: ${err}`);
+  }
+}
+
 

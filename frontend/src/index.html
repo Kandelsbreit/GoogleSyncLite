@@ -21,7 +21,7 @@
         </div>
         <span>Google Sync Lite</span>
       </div>
-      <span class="version-tag">v1.8.0</span>
+      <span class="version-tag">v1.9.0</span>
       <div class="safety-pill">
         <span class="safety-dot"></span>
         <span>ЩИТ БЕЗОПАСНОСТИ: АКТИВЕН</span>
@@ -571,6 +571,15 @@
         <div class="storage-categories-grid" id="storageCategoriesGrid">
           <!-- Categories rendered by JS -->
         </div>
+
+        <div class="card" style="margin-top: 14px;">
+          <div class="card-title">Корзина Google Диска</div>
+          <div class="card-desc">Файлы, удаленные из облака, временно хранятся в Корзине Google Диска и могут занимать место в квоте хранилища.</div>
+          <div style="display: flex; gap: 8px; margin-top: 12px; align-items: center;">
+            <button class="btn btn-sm btn-danger" onclick="emptyDriveTrash()">🗑 Очистить Корзину Google Диска</button>
+            <span id="trashStatusHint" style="font-size: 11px; color: var(--text-muted);">Безвозвратное удаление файлов из Корзины</span>
+          </div>
+        </div>
       </div>
 
     </div>
@@ -600,6 +609,27 @@
       <div class="modal-footer">
         <button class="btn btn-sm" onclick="closeDrivePicker()">Отмена</button>
         <button class="btn btn-primary btn-sm" onclick="confirmDrivePicker()">Выбрать эту папку</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: File Revision History -->
+  <div class="modal-overlay" id="revisionsModal">
+    <div class="modal-box" style="max-width: 580px;">
+      <div class="modal-header">
+        <div>
+          <div class="modal-title">История версий файла</div>
+          <div id="revisionsFileRelPath" style="font-size: 11px; color: var(--text-muted); word-break: break-all; margin-top: 2px;"></div>
+        </div>
+        <button class="win-btn" onclick="closeRevisionsModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="revisionsList" class="revisions-list">
+          <div style="padding: 16px; text-align: center; color: var(--text-muted);">Загрузка версий из Google Диска...</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm" onclick="closeRevisionsModal()">Закрыть</button>
       </div>
     </div>
   </div>

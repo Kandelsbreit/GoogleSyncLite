@@ -6,15 +6,25 @@ export function ChooseLocalFolder():Promise<string>;
 
 export function CreateDriveFolder(arg1:string,arg2:string):Promise<main.FolderItem>;
 
+export function CreateShareLink(arg1:string,arg2:boolean):Promise<main.ShareLinkResult>;
+
+export function EmptyDriveTrash():Promise<void>;
+
 export function GetAccountStorageInfo():Promise<main.StorageQuotaInfo>;
 
 export function GetDriveFolders():Promise<Array<main.FolderItem>>;
 
 export function GetFileDriveURL(arg1:string):Promise<string>;
 
+export function GetFileRevisions(arg1:string):Promise<Array<main.FileRevisionItem>>;
+
+export function GetLocalSubfolders():Promise<Array<main.FolderItem>>;
+
 export function GetRecentFiles():Promise<Array<main.RecentFileItem>>;
 
 export function GetStatus():Promise<Record<string, any>>;
+
+export function GetStorageBreakdown():Promise<main.StorageBreakdown>;
 
 export function HideToTray():Promise<void>;
 
@@ -34,9 +44,13 @@ export function PauseSync(arg1:number):Promise<void>;
 
 export function Quit():Promise<void>;
 
+export function RestoreFileRevision(arg1:string,arg2:string):Promise<void>;
+
 export function ResumeSync():Promise<void>;
 
 export function SaveSettings(arg1:main.Config):Promise<void>;
+
+export function SearchFiles(arg1:string,arg2:number):Promise<Array<main.SearchResultItem>>;
 
 export function SetTray(arg1:main.TrayManager):Promise<void>;
 

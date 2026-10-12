@@ -19,6 +19,7 @@ export namespace main {
 	    quiet_hours_enabled: boolean;
 	    quiet_hours_start: string;
 	    quiet_hours_end: string;
+	    excluded_folders: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -44,6 +45,29 @@ export namespace main {
 	        this.quiet_hours_enabled = source["quiet_hours_enabled"];
 	        this.quiet_hours_start = source["quiet_hours_start"];
 	        this.quiet_hours_end = source["quiet_hours_end"];
+	        this.excluded_folders = source["excluded_folders"];
+	    }
+	}
+	export class FileRevisionItem {
+	    id: string;
+	    modified_time: string;
+	    modified_time_ago: string;
+	    size: number;
+	    size_formatted: string;
+	    keep_forever: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new FileRevisionItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.modified_time = source["modified_time"];
+	        this.modified_time_ago = source["modified_time_ago"];
+	        this.size = source["size"];
+	        this.size_formatted = source["size_formatted"];
+	        this.keep_forever = source["keep_forever"];
 	    }
 	}
 	export class FolderItem {
@@ -86,6 +110,113 @@ export namespace main {
 	        this.drive_link = source["drive_link"];
 	    }
 	}
+	export class SearchResultItem {
+	    rel_path: string;
+	    file_name: string;
+	    folder: string;
+	    file_id: string;
+	    size: number;
+	    size_formatted: string;
+	    drive_link: string;
+	    mtime: string;
+	    synced_at: string;
+	    is_dir: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SearchResultItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.rel_path = source["rel_path"];
+	        this.file_name = source["file_name"];
+	        this.folder = source["folder"];
+	        this.file_id = source["file_id"];
+	        this.size = source["size"];
+	        this.size_formatted = source["size_formatted"];
+	        this.drive_link = source["drive_link"];
+	        this.mtime = source["mtime"];
+	        this.synced_at = source["synced_at"];
+	        this.is_dir = source["is_dir"];
+	    }
+	}
+	export class ShareLinkResult {
+	    url: string;
+	    file_id: string;
+	    is_public: boolean;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ShareLinkResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.url = source["url"];
+	        this.file_id = source["file_id"];
+	        this.is_public = source["is_public"];
+	        this.message = source["message"];
+	    }
+	}
+	export class StorageCategoryStat {
+	    category: string;
+	    count: number;
+	    total_bytes: number;
+	    size_formatted: string;
+	    percentage: number;
+	    color: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new StorageCategoryStat(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.category = source["category"];
+	        this.count = source["count"];
+	        this.total_bytes = source["total_bytes"];
+	        this.size_formatted = source["size_formatted"];
+	        this.percentage = source["percentage"];
+	        this.color = source["color"];
+	    }
+	}
+	export class StorageBreakdown {
+	    total_files: number;
+	    total_bytes: number;
+	    size_formatted: string;
+	    categories: StorageCategoryStat[];
+	
+	    static createFrom(source: any = {}) {
+	        return new StorageBreakdown(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.total_files = source["total_files"];
+	        this.total_bytes = source["total_bytes"];
+	        this.size_formatted = source["size_formatted"];
+	        this.categories = this.convertValues(source["categories"], StorageCategoryStat);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class StorageQuotaInfo {
 	    user_email: string;
 	    user_name: string;

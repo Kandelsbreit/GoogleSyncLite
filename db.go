@@ -166,6 +166,23 @@ func (d *Database) GetAllFiles() (map[string]FileState, error) {
 	return result, nil
 }
 
+func (d *Database) GetFile(relPath string) (*FileState, error) {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+
+	var s FileState
+	var isDirInt int
+	row := d.db.QueryRow("SELECT rel_path, file_id, md5, mtime, size, is_dir, last_synced_at FROM files WHERE rel_path = ?", relPath)
+	if err := row.Scan(&s.RelPath, &s.FileID, &s.MD5, &s.MTime, &s.Size, &isDirInt, &s.LastSyncedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	s.IsDir = isDirInt == 1
+	return &s, nil
+}
+
 func (d *Database) UpsertFile(s FileState) error {
 	d.lock.Lock()
 	defer d.lock.Unlock()
@@ -316,7 +333,6 @@ func (d *Database) GetRecentFiles(limit int) ([]RecentFileItem, error) {
 	defer rows.Close()
 
 	var items []RecentFileItem
-	now := time.Now().Unix()
 	for rows.Next() {
 		var it RecentFileItem
 		var syncedAt int64
@@ -330,23 +346,25 @@ func (d *Database) GetRecentFiles(limit int) ([]RecentFileItem, error) {
 		it.SizeFormatted = FormatBytes(it.Size)
 		t := time.Unix(syncedAt, 0)
 		it.Timestamp = t.Format("15:04:05")
-
-		diff := now - syncedAt
-		if diff < 60 {
-			it.TimeAgo = "только что"
-		} else if diff < 3600 {
-			it.TimeAgo = fmt.Sprintf("%d мин. назад", diff/60)
-		} else if diff < 86400 {
-			it.TimeAgo = fmt.Sprintf("%d ч. назад", diff/3600)
-		} else {
-			it.TimeAgo = t.Format("02.01 15:04")
-		}
+		it.TimeAgo = FormatTimeAgo(t)
 		items = append(items, it)
 	}
 	if items == nil {
 		items = []RecentFileItem{}
 	}
 	return items, nil
+}
+
+func FormatTimeAgo(t time.Time) string {
+	diff := time.Since(t)
+	if diff < time.Minute {
+		return "только что"
+	} else if diff < time.Hour {
+		return fmt.Sprintf("%d мин. назад", int(diff.Minutes()))
+	} else if diff < 24*time.Hour {
+		return fmt.Sprintf("%d ч. назад", int(diff.Hours()))
+	}
+	return t.Format("02.01 15:04")
 }
 
 func (d *Database) SearchFiles(query string, limit int) ([]SearchResultItem, error) {
