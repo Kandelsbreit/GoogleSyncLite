@@ -63,7 +63,7 @@ func (a *App) ensureWatcher() {
 		a.watcher = nil
 	}
 
-	w, err := NewFileWatcher(cleanFolder, cfg.CustomIgnoreRules, func() {
+	w, err := NewFileWatcher(cleanFolder, cfg.CombinedIgnoreRules(), func() {
 		if a.IsPaused() {
 			return
 		}
@@ -157,7 +157,7 @@ func (a *App) ensureEngine(ctx context.Context) (*SyncEngineGo, error) {
 	engine.SetConcurrency(cfg.ConcurrentUploads)
 	engine.SetBandwidthLimit(cfg.BandwidthLimitKBPS)
 	engine.SetConflictStrategy(cfg.ConflictStrategy)
-	engine.SetIgnoreMatcher(NewIgnoreMatcher(cfg.LocalFolder, cfg.CustomIgnoreRules))
+	engine.SetIgnoreMatcher(NewIgnoreMatcher(cfg.LocalFolder, cfg.CombinedIgnoreRules()))
 	engine.SetProgressCallback(func(p SyncProgress) {
 		if a.ctx != nil {
 			runtime.EventsEmit(a.ctx, "sync-progress", p)
@@ -177,6 +177,46 @@ func (a *App) GetRecentFiles() ([]RecentFileItem, error) {
 		return []RecentFileItem{}, nil
 	}
 	return a.db.GetRecentFiles(20)
+}
+
+func (a *App) SearchFiles(query string, limit int) ([]SearchResultItem, error) {
+	if a.db == nil {
+		return []SearchResultItem{}, nil
+	}
+	return a.db.SearchFiles(query, limit)
+}
+
+func (a *App) GetStorageBreakdown() (*StorageBreakdown, error) {
+	if a.db == nil {
+		return &StorageBreakdown{}, nil
+	}
+	return a.db.GetStorageBreakdown()
+}
+
+func (a *App) GetLocalSubfolders() ([]FolderItem, error) {
+	cfg := GetConfig()
+	target := cfg.LocalFolder
+	if target == "" {
+		target = "."
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		return []FolderItem{}, err
+	}
+	var folders []FolderItem
+	for _, entry := range entries {
+		if entry.IsDir() {
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") || name == "System Volume Information" || name == "$RECYCLE.BIN" {
+				continue
+			}
+			folders = append(folders, FolderItem{
+				ID:   name,
+				Name: name,
+			})
+		}
+	}
+	return folders, nil
 }
 
 func (a *App) updateSyncResult(timeStr, msg string) {

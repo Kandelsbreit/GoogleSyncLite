@@ -26,6 +26,18 @@ function switchTab(name) {
   const pageEl = document.getElementById('page-' + name);
   if (navEl) navEl.classList.add('active');
   if (pageEl) pageEl.classList.add('active');
+
+  if (name === 'search') {
+    const input = document.getElementById('fileSearchInput');
+    if (input) {
+      setTimeout(() => input.focus(), 60);
+      if (!input.value) searchFiles('');
+    }
+  } else if (name === 'storage') {
+    loadStorageBreakdown();
+  } else if (name === 'settings') {
+    loadSelectiveSyncFolders();
+  }
 }
 
 // Logging Engine
@@ -282,6 +294,11 @@ async function loadStatus() {
 
       setValIfNotFocused('cfgQuietHoursStart', cfg.quiet_hours_start || '23:00');
       setValIfNotFocused('cfgQuietHoursEnd', cfg.quiet_hours_end || '07:00');
+
+      currentExcludedFolders = cfg.excluded_folders || [];
+      if (cachedSubfolders.length > 0) {
+        renderSelectiveSyncList(cachedSubfolders, currentExcludedFolders);
+      }
 
       setValIfNotFocused('cfgMaxDeleteThreshold', cfg.max_delete_threshold || 20);
 
@@ -692,6 +709,7 @@ async function saveSettings() {
     quiet_hours_enabled: quietHoursEnabled,
     quiet_hours_start: quietHoursStart,
     quiet_hours_end: quietHoursEnd,
+    excluded_folders: currentExcludedFolders,
     sync_mode: currentSyncMode,
     safety_shield: true,
     allow_remote_deletion: document.getElementById('cfgAllowRemoteDeletion').checked,
@@ -808,3 +826,206 @@ window.addEventListener('DOMContentLoaded', () => {
   setInterval(loadRecentFiles, 5000);
   setInterval(loadStorageQuota, 60000);
 });
+
+// --- Phase 5: Search, Storage Breakdown & Selective Sync Engines ---
+
+let searchDebounceTimer = null;
+
+function onSearchInput(val) {
+  const clearBtn = document.getElementById('searchClearBtn');
+  if (clearBtn) {
+    clearBtn.style.display = val ? 'inline-block' : 'none';
+  }
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    searchFiles(val);
+  }, 180);
+}
+
+function clearSearch() {
+  const input = document.getElementById('fileSearchInput');
+  if (input) {
+    input.value = '';
+    onSearchInput('');
+    input.focus();
+  }
+}
+
+function getFileIcon(fileName) {
+  const ext = fileName.split('.').pop().toLowerCase();
+  switch (ext) {
+    case 'pdf': return '📕';
+    case 'doc': case 'docx': return '📘';
+    case 'xls': case 'xlsx': case 'csv': return '📊';
+    case 'ppt': case 'pptx': return '📙';
+    case 'txt': case 'md': return '📄';
+    case 'jpg': case 'jpeg': case 'png': case 'gif': case 'webp': case 'svg': case 'psd': return '🖼️';
+    case 'mp4': case 'mkv': case 'avi': case 'mov': return '🎬';
+    case 'mp3': case 'wav': case 'flac': return '🎵';
+    case 'zip': case 'rar': case '7z': case 'tar': case 'gz': return '📦';
+    case 'go': case 'js': case 'ts': case 'py': case 'html': case 'css': case 'json': return '💻';
+    default: return '📄';
+  }
+}
+
+async function searchFiles(query) {
+  if (!window.go || !window.go.main || !window.go.main.App || !window.go.main.App.SearchFiles) return;
+  const listEl = document.getElementById('searchResultsList');
+  const countEl = document.getElementById('searchResultCount');
+  if (!listEl) return;
+
+  try {
+    const results = await window.go.main.App.SearchFiles(query, 50);
+    if (!results || results.length === 0) {
+      listEl.innerHTML = '<div class="search-empty-state">Файлы по данному запросу не найдены.</div>';
+      if (countEl) countEl.textContent = 'Найдено: 0 файлов';
+      return;
+    }
+
+    if (countEl) {
+      countEl.textContent = `Найдено: ${results.length} файлов${results.length >= 50 ? ' (показаны первые 50)' : ''}`;
+    }
+
+    let html = '';
+    for (const it of results) {
+      const icon = getFileIcon(it.file_name);
+      const safeRel = escapeHtml(it.rel_path);
+      const safeJsRel = it.rel_path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const safeDriveLink = it.drive_link ? it.drive_link.replace(/'/g, "\\'") : '';
+
+      let actionsHtml = `
+        <button class="recent-file-btn" onclick="openLocalFile('${safeJsRel}')" title="Показать в проводнике Windows">📂</button>
+      `;
+
+      if (it.drive_link) {
+        actionsHtml += `
+          <button class="recent-file-btn" onclick="openInDrive('${safeJsRel}')" title="Открыть в Google Диске (в браузере)">↗</button>
+          <button class="recent-file-btn" onclick="copyDriveUrl('${safeDriveLink}')" title="Скопировать ссылку на файл">🔗</button>
+        `;
+      }
+
+      html += `
+        <div class="search-result-item" title="${safeRel}">
+          <div class="search-result-left">
+            <span class="search-file-icon">${icon}</span>
+            <div class="search-file-meta">
+              <span class="search-file-name">${escapeHtml(it.file_name)}</span>
+              <span class="search-file-folder">${escapeHtml(it.folder || '/')}</span>
+            </div>
+          </div>
+          <div class="search-result-right">
+            <span class="search-file-size">${escapeHtml(it.size_formatted || '0 Б')}</span>
+            <span class="search-file-time">${escapeHtml(it.synced_at || it.mtime || '')}</span>
+            <div class="recent-file-actions">
+              ${actionsHtml}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    listEl.innerHTML = html;
+  } catch (err) {
+    console.error('Search error:', err);
+  }
+}
+
+async function loadStorageBreakdown() {
+  if (!window.go || !window.go.main || !window.go.main.App || !window.go.main.App.GetStorageBreakdown) return;
+  const barEl = document.getElementById('storageSegmentedBar');
+  const gridEl = document.getElementById('storageCategoriesGrid');
+  const sizeEl = document.getElementById('storageTotalSize');
+  const countEl = document.getElementById('storageTotalCount');
+
+  try {
+    const data = await window.go.main.App.GetStorageBreakdown();
+    if (!data) return;
+
+    if (sizeEl) sizeEl.textContent = data.size_formatted || '0 Б';
+    if (countEl) countEl.textContent = `${(data.total_files || 0).toLocaleString('ru-RU')} файлов синхронизировано локально`;
+
+    if (barEl && data.categories) {
+      let barHtml = '';
+      for (const cat of data.categories) {
+        if (cat.percentage > 0.5) {
+          barHtml += `<div class="storage-segment" style="width: ${cat.percentage}%; background-color: ${cat.color};" title="${escapeHtml(cat.category)}: ${escapeHtml(cat.size_formatted)} (${cat.percentage.toFixed(1)}%)"></div>`;
+        }
+      }
+      barEl.innerHTML = barHtml || '<div style="width: 100%; background: rgba(255,255,255,0.05);"></div>';
+    }
+
+    if (gridEl && data.categories) {
+      let gridHtml = '';
+      for (const cat of data.categories) {
+        gridHtml += `
+          <div class="storage-category-card">
+            <div class="storage-category-header">
+              <span class="storage-cat-dot" style="background-color: ${cat.color};"></span>
+              <span class="storage-category-name">${escapeHtml(cat.category)}</span>
+              <span class="storage-category-pct">${(cat.percentage || 0).toFixed(1)}%</span>
+            </div>
+            <div class="storage-category-size">${escapeHtml(cat.size_formatted || '0 Б')}</div>
+            <div class="storage-category-count">${(cat.count || 0).toLocaleString('ru-RU')} файлов</div>
+          </div>
+        `;
+      }
+      gridEl.innerHTML = gridHtml;
+    }
+  } catch (err) {
+    console.error('Failed to load storage breakdown:', err);
+  }
+}
+
+let currentExcludedFolders = [];
+let cachedSubfolders = [];
+
+async function loadSelectiveSyncFolders() {
+  if (!window.go || !window.go.main || !window.go.main.App || !window.go.main.App.GetLocalSubfolders) return;
+  const listEl = document.getElementById('selectiveSyncList');
+  if (!listEl) return;
+
+  try {
+    const folders = await window.go.main.App.GetLocalSubfolders();
+    cachedSubfolders = folders || [];
+    renderSelectiveSyncList(cachedSubfolders, currentExcludedFolders);
+  } catch (err) {
+    console.error('Failed to get subfolders:', err);
+  }
+}
+
+function renderSelectiveSyncList(folders, excluded) {
+  const listEl = document.getElementById('selectiveSyncList');
+  if (!listEl) return;
+
+  if (!folders || folders.length === 0) {
+    listEl.innerHTML = '<div style="font-size: 12px; color: var(--text-muted); padding: 8px;">Корневых подпапок в локальной директории не обнаружено.</div>';
+    return;
+  }
+
+  const exclSet = new Set(excluded || []);
+  let html = '';
+  for (const f of folders) {
+    const isChecked = !exclSet.has(f.name);
+    const safeName = escapeHtml(f.name);
+    html += `
+      <label class="selective-sync-item">
+        <input type="checkbox" ${isChecked ? 'checked' : ''} onchange="toggleFolderExclusion('${safeName}', this.checked)">
+        <span class="selective-sync-label">
+          <span>📁</span>
+          <span>${safeName}</span>
+        </span>
+      </label>
+    `;
+  }
+  listEl.innerHTML = html;
+}
+
+function toggleFolderExclusion(folderName, isChecked) {
+  if (isChecked) {
+    currentExcludedFolders = currentExcludedFolders.filter(f => f !== folderName);
+  } else {
+    if (!currentExcludedFolders.includes(folderName)) {
+      currentExcludedFolders.push(folderName);
+    }
+  }
+}
+

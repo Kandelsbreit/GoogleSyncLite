@@ -21,7 +21,7 @@
         </div>
         <span>Google Sync Lite</span>
       </div>
-      <span class="version-tag">v1.7.0</span>
+      <span class="version-tag">v1.8.0</span>
       <div class="safety-pill">
         <span class="safety-dot"></span>
         <span>ЩИТ БЕЗОПАСНОСТИ: АКТИВЕН</span>
@@ -59,6 +59,21 @@
             <rect x="3" y="16" width="7" height="5" rx="1"/>
           </svg>
           <span>Обзор</span>
+        </div>
+        <div class="nav-item" id="nav-search" onclick="switchTab('search')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <span>Поиск</span>
+        </div>
+        <div class="nav-item" id="nav-storage" onclick="switchTab('storage')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="20" x2="18" y2="10"/>
+            <line x1="12" y1="20" x2="12" y2="4"/>
+            <line x1="6" y1="20" x2="6" y2="14"/>
+          </svg>
+          <span>Хранилище</span>
         </div>
         <div class="nav-item" id="nav-settings" onclick="switchTab('settings')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -327,6 +342,24 @@
           </div>
         </div>
 
+        <!-- Selective Sync Card -->
+        <div class="card">
+          <div class="card-title">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span>📁 Выборочная синхронизация папок (Selective Sync)</span>
+            </div>
+            <button class="btn btn-sm" onclick="loadSelectiveSyncFolders()" title="Обновить список папок">
+              🔄 Обновить папки
+            </button>
+          </div>
+          <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 10px;">
+            Отметьте подпапки, которые должны синхронизироваться. Снятые папки исключаются из загрузки/скачивания и не занимают место на диске.
+          </div>
+          <div class="selective-sync-list" id="selectiveSyncList">
+            <div style="font-size: 12px; color: var(--text-muted); padding: 8px;">Нажмите «Обновить папки» для загрузки структуры.</div>
+          </div>
+        </div>
+
         <div class="card">
           <div class="card-title">Автоматизация фоновой работы</div>
           
@@ -485,6 +518,58 @@
             </div>
           </div>
           <div class="terminal-body" id="terminalLog">Ожидание событий...</div>
+        </div>
+      </div>
+
+      <!-- PAGE: SEARCH -->
+      <div class="page" id="page-search">
+        <div class="page-header">
+          <div class="page-title">Быстрый поиск файлов</div>
+        </div>
+
+        <div class="card">
+          <div class="search-input-wrapper">
+            <svg class="search-input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input type="text" id="fileSearchInput" class="search-box-input" placeholder="Поиск по имени, расширению или папке (например: report, .pdf, photos/)..." oninput="onSearchInput(this.value)">
+            <button class="search-clear-btn" id="searchClearBtn" onclick="clearSearch()" title="Очистить поиск" style="display: none;">✕</button>
+          </div>
+          <div class="search-status-bar">
+            <span id="searchResultCount" style="font-size: 11px; color: var(--text-muted);">Мгновенный локальный индекс по всей базе файлов</span>
+          </div>
+        </div>
+
+        <div class="card" style="padding: 6px; overflow: hidden;">
+          <div class="search-results-list" id="searchResultsList">
+            <div class="search-empty-state">Введите поисковый запрос выше для мгновенного поиска по файлам.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PAGE: STORAGE -->
+      <div class="page" id="page-storage">
+        <div class="page-header">
+          <div class="page-title">Анализ занятого места</div>
+        </div>
+
+        <div class="card">
+          <div class="storage-summary-header">
+            <div>
+              <div class="storage-total-size" id="storageTotalSize">0 Б</div>
+              <div class="storage-total-count" id="storageTotalCount">0 файлов проиндексировано</div>
+            </div>
+            <button class="btn btn-sm" onclick="loadStorageBreakdown()">🔄 Обновить анализ</button>
+          </div>
+
+          <div class="storage-segmented-bar" id="storageSegmentedBar">
+            <!-- Segments rendered by JS -->
+          </div>
+        </div>
+
+        <div class="storage-categories-grid" id="storageCategoriesGrid">
+          <!-- Categories rendered by JS -->
         </div>
       </div>
 

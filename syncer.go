@@ -175,7 +175,7 @@ func NewSyncEngineGo(srv *drive.Service, db *Database, localRoot, remoteRoot str
 		concurrency:        4,
 		bandwidthLimitKBPS: cfg.BandwidthLimitKBPS,
 		conflictStrategy:   cfg.ConflictStrategy,
-		ignoreMatcher:      NewIgnoreMatcher(localRoot, cfg.CustomIgnoreRules),
+		ignoreMatcher:      NewIgnoreMatcher(localRoot, cfg.CombinedIgnoreRules()),
 	}
 }
 

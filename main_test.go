@@ -740,6 +740,86 @@ func TestRecentFileDriveLinkAndConflictStrategy(t *testing.T) {
 	}
 }
 
+func TestCombinedIgnoreRules(t *testing.T) {
+	cfg := Config{
+		CustomIgnoreRules: []string{"*.tmp", "node_modules"},
+		ExcludedFolders:   []string{"BigVideos", "HeavyArchive"},
+	}
+	combined := cfg.CombinedIgnoreRules()
+	if len(combined) != 4 {
+		t.Fatalf("expected 4 combined rules, got %d", len(combined))
+	}
+	matcher := NewIgnoreMatcher("", combined)
+	if !matcher.ShouldIgnore("BigVideos", true) {
+		t.Errorf("expected BigVideos folder to be ignored")
+	}
+	if !matcher.ShouldIgnore("BigVideos/clip.mp4", false) {
+		t.Errorf("expected BigVideos/clip.mp4 to be ignored")
+	}
+	if matcher.ShouldIgnore("Photos/image.png", false) {
+		t.Errorf("expected Photos/image.png NOT to be ignored")
+	}
+}
+
+func TestSearchFilesAndStorageBreakdown(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "search_test.db")
+	db, err := OpenDatabase(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Insert test files
+	_ = db.UpsertFile(FileState{RelPath: "docs/annual_report_2026.pdf", FileID: "id_pdf", Size: 2048})
+	_ = db.UpsertFile(FileState{RelPath: "photos/family_vacation.jpg", FileID: "id_jpg", Size: 4096})
+	_ = db.UpsertFile(FileState{RelPath: "code/main.go", FileID: "id_go", Size: 1024})
+	_ = db.UpsertFile(FileState{RelPath: "archive/backup.zip", FileID: "id_zip", Size: 8192})
+
+	// 1. Test SearchFiles with query
+	results, err := db.SearchFiles("report", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].FileName != "annual_report_2026.pdf" {
+		t.Fatalf("expected 1 result for 'report', got %v", results)
+	}
+	if results[0].DriveLink != "https://drive.google.com/file/d/id_pdf/view" {
+		t.Errorf("unexpected drive link: %s", results[0].DriveLink)
+	}
+
+	// 2. Test Multi-word SearchFiles
+	results, err = db.SearchFiles("family vacation", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].FileName != "family_vacation.jpg" {
+		t.Fatalf("expected 1 result for 'family vacation', got %v", results)
+	}
+
+	// 3. Test Empty SearchFiles (all files)
+	allResults, err := db.SearchFiles("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allResults) != 4 {
+		t.Fatalf("expected 4 results, got %d", len(allResults))
+	}
+
+	// 4. Test Storage Breakdown
+	breakdown, err := db.GetStorageBreakdown()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if breakdown.TotalFiles != 4 {
+		t.Fatalf("expected 4 total files, got %d", breakdown.TotalFiles)
+	}
+	expectedTotalBytes := int64(2048 + 4096 + 1024 + 8192)
+	if breakdown.TotalBytes != expectedTotalBytes {
+		t.Fatalf("expected %d total bytes, got %d", expectedTotalBytes, breakdown.TotalBytes)
+	}
+}
+
 
 
 

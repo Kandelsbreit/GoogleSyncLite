@@ -29,6 +29,7 @@ type Config struct {
 	QuietHoursEnabled    bool     `json:"quiet_hours_enabled"`
 	QuietHoursStart      string   `json:"quiet_hours_start"` // e.g. "23:00"
 	QuietHoursEnd        string   `json:"quiet_hours_end"`   // e.g. "07:00"
+	ExcludedFolders      []string `json:"excluded_folders"`  // Selective Sync: folders to skip
 }
 
 func DefaultIgnoreRules() []string {
@@ -39,6 +40,18 @@ func DefaultIgnoreRules() []string {
 		"*.log",
 		"__pycache__",
 	}
+}
+
+func (cfg Config) CombinedIgnoreRules() []string {
+	var combined []string
+	combined = append(combined, cfg.CustomIgnoreRules...)
+	for _, folder := range cfg.ExcludedFolders {
+		folder = strings.TrimSpace(folder)
+		if folder != "" {
+			combined = append(combined, folder)
+		}
+	}
+	return combined
 }
 
 func parseTimeToMinutes(s string) (int, error) {
@@ -110,6 +123,9 @@ func NormalizeConfig(cfg Config) Config {
 	if cfg.QuietHoursEnd == "" {
 		cfg.QuietHoursEnd = "07:00"
 	}
+	if cfg.ExcludedFolders == nil {
+		cfg.ExcludedFolders = []string{}
+	}
 	cfg.SafetyShield = true
 	return cfg
 }
@@ -146,6 +162,7 @@ func LoadConfig() Config {
 		QuietHoursEnabled:    false,
 		QuietHoursStart:      "23:00",
 		QuietHoursEnd:        "07:00",
+		ExcludedFolders:      []string{},
 	}
 
 	data, err := os.ReadFile(cfgPath)
@@ -182,6 +199,9 @@ func LoadConfig() Config {
 		}
 		if _, hasQEnd := rawMap["quiet_hours_end"]; !hasQEnd {
 			appConfig.QuietHoursEnd = "07:00"
+		}
+		if _, hasExcl := rawMap["excluded_folders"]; !hasExcl {
+			appConfig.ExcludedFolders = []string{}
 		}
 		appConfig = NormalizeConfig(appConfig)
 	} else {
