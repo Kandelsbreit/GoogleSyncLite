@@ -293,7 +293,7 @@ func TestStatusPersistence(t *testing.T) {
 func TestFileWatcherFilters(t *testing.T) {
 	tmpDir := t.TempDir()
 	var triggered bool
-	fw, err := NewFileWatcher(tmpDir, func() {
+	fw, err := NewFileWatcher(tmpDir, nil, func() {
 		triggered = true
 	}, nil)
 	if err != nil {
@@ -438,5 +438,114 @@ func TestGetOrComputeMD5ThreadSafety(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestIgnoreMatcher(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a .syncignore file in tmpDir
+	syncIgnoreContent := `
+# Comment
+node_modules/
+*.secret
+build/
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, ".syncignore"), []byte(syncIgnoreContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	customRules := []string{"*.log", "dist/"}
+	matcher := NewIgnoreMatcher(tmpDir, customRules)
+
+	// Builtin rules
+	if !matcher.ShouldIgnore("desktop.ini", false) {
+		t.Error("expected desktop.ini to be ignored")
+	}
+	if !matcher.ShouldIgnore("thumbs.db", false) {
+		t.Error("expected thumbs.db to be ignored")
+	}
+	if !matcher.ShouldIgnore("temp.tmp", false) {
+		t.Error("expected temp.tmp to be ignored")
+	}
+	if !matcher.ShouldIgnore("~$$doc.docx", false) {
+		t.Error("expected ~$ to be ignored")
+	}
+
+	// .syncignore rules
+	if !matcher.ShouldIgnore("node_modules/pkg/index.js", false) {
+		t.Error("expected file inside node_modules to be ignored")
+	}
+	if !matcher.ShouldIgnore("node_modules", true) {
+		t.Error("expected node_modules directory to be ignored")
+	}
+	if !matcher.ShouldIgnore("api.secret", false) {
+		t.Error("expected *.secret to be ignored")
+	}
+	if !matcher.ShouldIgnore("build/bundle.js", false) {
+		t.Error("expected build directory file to be ignored")
+	}
+
+	// Custom rules from config
+	if !matcher.ShouldIgnore("app.log", false) {
+		t.Error("expected *.log to be ignored")
+	}
+	if !matcher.ShouldIgnore("dist/main.js", false) {
+		t.Error("expected dist/ directory to be ignored")
+	}
+
+	// Regular files should NOT be ignored
+	if matcher.ShouldIgnore("src/main.go", false) {
+		t.Error("expected src/main.go to NOT be ignored")
+	}
+	if matcher.ShouldIgnore("photo.png", false) {
+		t.Error("expected photo.png to NOT be ignored")
+	}
+}
+
+func TestAppPauseResume(t *testing.T) {
+	app := &App{}
+
+	if app.IsPaused() {
+		t.Fatal("expected initially not paused")
+	}
+
+	// Pause manual
+	_ = app.PauseSync(0)
+	if !app.IsPaused() {
+		t.Fatal("expected paused after PauseSync(0)")
+	}
+
+	status := app.GetStatus()
+	if isPaused, ok := status["is_paused"].(bool); !ok || !isPaused {
+		t.Fatal("expected status[is_paused] to be true")
+	}
+
+	// Resume
+	_ = app.ResumeSync()
+	if app.IsPaused() {
+		t.Fatal("expected unpaused after ResumeSync()")
+	}
+
+	statusAfter := app.GetStatus()
+	if isPaused, ok := statusAfter["is_paused"].(bool); !ok || isPaused {
+		t.Fatal("expected status[is_paused] to be false")
+	}
+
+	// Pause with duration
+	_ = app.PauseSync(60)
+	if !app.IsPaused() {
+		t.Fatal("expected paused after PauseSync(60)")
+	}
+	statusTimed := app.GetStatus()
+	remSec, ok := statusTimed["pause_remaining_seconds"].(int64)
+	if !ok || remSec <= 0 {
+		t.Fatalf("expected positive pause_remaining_seconds, got %v", statusTimed["pause_remaining_seconds"])
+	}
+
+	_ = app.ResumeSync()
+	if app.IsPaused() {
+		t.Fatal("expected unpaused after final ResumeSync()")
+	}
+}
+
 
 

@@ -386,6 +386,11 @@ body {
   animation: pulse-dot 1.2s infinite;
 }
 
+.status-banner.paused .status-indicator-orb {
+  background: #f59e0b;
+  box-shadow: 0 0 10px #f59e0b;
+}
+
 .status-info {
   display: flex;
   flex-direction: column;
@@ -406,6 +411,93 @@ body {
 .status-right {
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* Sync Controls & Action Grids */
+.sync-controls-row {
+  display: grid;
+  grid-template-columns: 2fr 1.5fr 1fr;
+  gap: 10px;
+}
+
+.secondary-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+
+.pause-dropdown-wrapper {
+  position: relative;
+  display: inline-flex;
+  width: 100%;
+}
+
+.pause-dropdown-wrapper .btn {
+  width: 100%;
+}
+
+.pause-dropdown-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 100%;
+  min-width: 180px;
+  background: #141a28;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
+  z-index: 100;
+  overflow: hidden;
+}
+
+.pause-dropdown-menu.show {
+  display: block;
+  animation: fadeInDown 0.15s ease-out;
+}
+
+@keyframes fadeInDown {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.pause-menu-item {
+  padding: 9px 12px;
+  font-size: 12px;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: background 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pause-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.pause-menu-item.resume-item {
+  color: #34d399;
+  font-weight: 600;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.pause-menu-item.resume-item:hover {
+  background: rgba(16, 185, 129, 0.18);
+}
+
+.dropdown-arrow {
+  font-size: 8px;
+  margin-left: auto;
+  opacity: 0.6;
+}
+
+.btn-warning.is-resuming {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #34d399;
 }
 
 /* Action Buttons Grid */
@@ -575,6 +667,26 @@ input[type="text"]:focus, input[type="number"]:focus {
 input[readonly] {
   color: var(--text-secondary);
   cursor: default;
+}
+
+.form-textarea {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 9px 12px;
+  color: var(--text-main);
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.form-textarea:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
 }
 
 /* Modern iOS-style Switch */

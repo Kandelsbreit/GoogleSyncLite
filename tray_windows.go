@@ -69,11 +69,21 @@ const (
 	SM_CXSMICON = 49
 	SM_CYSMICON = 50
 
-	IDM_TITLE = 1000
-	IDM_OPEN  = 1001
-	IDM_SYNC  = 1002
-	IDM_STOP  = 1003
-	IDM_QUIT  = 1004
+	IDM_TITLE     = 1000
+	IDM_OPEN      = 1001
+	IDM_SYNC      = 1002
+	IDM_STOP      = 1003
+	IDM_RESUME    = 1004
+	IDM_PAUSE_1H  = 1005
+	IDM_PAUSE_2H  = 1006
+	IDM_PAUSE_MAN = 1007
+	IDM_QUIT      = 1008
+
+	NIF_INFO     = 0x00000010
+	NIIF_NONE    = 0x00000000
+	NIIF_INFO    = 0x00000001
+	NIIF_WARNING = 0x00000002
+	NIIF_ERROR   = 0x00000003
 )
 
 type NOTIFYICONDATAW struct {
@@ -105,6 +115,9 @@ type TrayManager struct {
 	onOpen   func()
 	onSync   func()
 	onStop   func()
+	onPause  func(int)
+	onResume func()
+	isPaused func() bool
 	onQuit   func()
 	mu       sync.Mutex
 	stopOnce sync.Once
@@ -142,6 +155,22 @@ func trayWndProc(hwnd windows.Handle, msg uint32, wParam, lParam uintptr) uintpt
 				if globalTray.onStop != nil {
 					go globalTray.onStop()
 				}
+			case IDM_RESUME:
+				if globalTray.onResume != nil {
+					go globalTray.onResume()
+				}
+			case IDM_PAUSE_1H:
+				if globalTray.onPause != nil {
+					go globalTray.onPause(60)
+				}
+			case IDM_PAUSE_2H:
+				if globalTray.onPause != nil {
+					go globalTray.onPause(120)
+				}
+			case IDM_PAUSE_MAN:
+				if globalTray.onPause != nil {
+					go globalTray.onPause(0)
+				}
 			case IDM_QUIT:
 				if globalTray.onQuit != nil {
 					globalTray.onQuit()
@@ -168,6 +197,10 @@ func (tm *TrayManager) showMenu(hwnd windows.Handle) {
 	openStr, _ := windows.UTF16PtrFromString("Открыть интерфейс")
 	syncStr, _ := windows.UTF16PtrFromString("Синхронизировать сейчас")
 	stopStr, _ := windows.UTF16PtrFromString("Остановить")
+	resumeStr, _ := windows.UTF16PtrFromString("▶ Возобновить синхронизацию")
+	pause1hStr, _ := windows.UTF16PtrFromString("⏸ Приостановить на 1 час")
+	pause2hStr, _ := windows.UTF16PtrFromString("⏸ Приостановить на 2 часа")
+	pauseManStr, _ := windows.UTF16PtrFromString("⏸ Приостановить вручную")
 	quitStr, _ := windows.UTF16PtrFromString("Выход")
 
 	procAppendMenuW.Call(hMenu, MF_STRING|MF_DISABLED, uintptr(IDM_TITLE), uintptr(unsafe.Pointer(titleStr)))
@@ -175,6 +208,16 @@ func (tm *TrayManager) showMenu(hwnd windows.Handle) {
 	procAppendMenuW.Call(hMenu, MF_STRING, uintptr(IDM_OPEN), uintptr(unsafe.Pointer(openStr)))
 	procAppendMenuW.Call(hMenu, MF_STRING, uintptr(IDM_SYNC), uintptr(unsafe.Pointer(syncStr)))
 	procAppendMenuW.Call(hMenu, MF_STRING, uintptr(IDM_STOP), uintptr(unsafe.Pointer(stopStr)))
+	procAppendMenuW.Call(hMenu, MF_SEPARATOR, 0, 0)
+
+	if tm.isPaused != nil && tm.isPaused() {
+		procAppendMenuW.Call(hMenu, MF_STRING, uintptr(IDM_RESUME), uintptr(unsafe.Pointer(resumeStr)))
+	} else {
+		procAppendMenuW.Call(hMenu, MF_STRING, uintptr(IDM_PAUSE_1H), uintptr(unsafe.Pointer(pause1hStr)))
+		procAppendMenuW.Call(hMenu, MF_STRING, uintptr(IDM_PAUSE_2H), uintptr(unsafe.Pointer(pause2hStr)))
+		procAppendMenuW.Call(hMenu, MF_STRING, uintptr(IDM_PAUSE_MAN), uintptr(unsafe.Pointer(pauseManStr)))
+	}
+
 	procAppendMenuW.Call(hMenu, MF_SEPARATOR, 0, 0)
 	procAppendMenuW.Call(hMenu, MF_STRING, uintptr(IDM_QUIT), uintptr(unsafe.Pointer(quitStr)))
 
@@ -200,12 +243,15 @@ type WNDCLASSEXW struct {
 	HIconSm       windows.Handle
 }
 
-func StartTray(onOpen, onSync, onStop, onQuit func()) (*TrayManager, error) {
+func StartTray(onOpen, onSync, onStop func(), onPause func(int), onResume func(), isPaused func() bool, onQuit func()) (*TrayManager, error) {
 	tm := &TrayManager{
-		onOpen: onOpen,
-		onSync: onSync,
-		onStop: onStop,
-		onQuit: onQuit,
+		onOpen:   onOpen,
+		onSync:   onSync,
+		onStop:   onStop,
+		onPause:  onPause,
+		onResume: onResume,
+		isPaused: isPaused,
+		onQuit:   onQuit,
 	}
 	globalTray = tm
 
@@ -348,6 +394,34 @@ func (tm *TrayManager) UpdateTooltip(tip string) {
 	tipUTF16, _ := windows.UTF16FromString(tip)
 	copy(tm.nid.SzTip[:], tipUTF16)
 	procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&tm.nid)))
+}
+
+func (tm *TrayManager) ShowNotification(title, message, notifyType string) {
+	if tm == nil || tm.hwnd == 0 {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	nid := tm.nid
+	nid.UFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO
+
+	titleUTF16, _ := windows.UTF16FromString(title)
+	copy(nid.SzInfoTitle[:], titleUTF16)
+
+	msgUTF16, _ := windows.UTF16FromString(message)
+	copy(nid.SzInfo[:], msgUTF16)
+
+	switch notifyType {
+	case "error":
+		nid.DwInfoFlags = NIIF_ERROR
+	case "warning":
+		nid.DwInfoFlags = NIIF_WARNING
+	default:
+		nid.DwInfoFlags = NIIF_INFO
+	}
+
+	procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&nid)))
 }
 
 func (tm *TrayManager) Stop() {

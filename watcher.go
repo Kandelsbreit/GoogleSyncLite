@@ -22,9 +22,10 @@ type FileWatcher struct {
 	debounceMu    sync.Mutex
 	watchedDirs   map[string]bool
 	watchedMu     sync.RWMutex
+	matcher       *IgnoreMatcher
 }
 
-func NewFileWatcher(localRoot string, onChange func(), logCb func(string)) (*FileWatcher, error) {
+func NewFileWatcher(localRoot string, customRules []string, onChange func(), logCb func(string)) (*FileWatcher, error) {
 	if localRoot == "" {
 		return nil, fmt.Errorf("локальная папка для мониторинга не указана")
 	}
@@ -41,6 +42,7 @@ func NewFileWatcher(localRoot string, onChange func(), logCb func(string)) (*Fil
 		logCb:       logCb,
 		stopCh:      make(chan struct{}),
 		watchedDirs: make(map[string]bool),
+		matcher:     NewIgnoreMatcher(localRoot, customRules),
 	}
 
 	fw.initWatchDirs()
@@ -56,9 +58,15 @@ func (fw *FileWatcher) initWatchDirs() {
 			return nil
 		}
 		if d.IsDir() {
-			name := d.Name()
-			if path != fw.localRoot && (strings.HasPrefix(name, ".") || name == "$RECYCLE.BIN" || name == "System Volume Information" || name == "__pycache__" || name == "node_modules") {
-				return fs.SkipDir
+			if path != fw.localRoot {
+				rel, err := filepath.Rel(fw.localRoot, path)
+				if err == nil && fw.matcher != nil && fw.matcher.ShouldIgnore(rel, true) {
+					return fs.SkipDir
+				}
+				name := d.Name()
+				if strings.HasPrefix(name, ".") || name == "$RECYCLE.BIN" || name == "System Volume Information" || name == "__pycache__" || name == "node_modules" {
+					return fs.SkipDir
+				}
 			}
 			fw.addDir(path)
 			count++
@@ -113,17 +121,13 @@ func (fw *FileWatcher) isIgnoredPath(fullPath string) bool {
 		return true
 	}
 
-	relSlash := filepath.ToSlash(rel)
-	if IsIgnoredRelPath(relSlash) {
+	if fw.matcher != nil && fw.matcher.ShouldIgnore(rel, false) {
 		return true
 	}
 
-	// Check if any path segment starts with . or is system volume / recycle bin
-	parts := strings.Split(relSlash, "/")
-	for _, part := range parts {
-		if strings.HasPrefix(part, ".") || part == "$RECYCLE.BIN" || part == "System Volume Information" || part == "__pycache__" || part == "node_modules" {
-			return true
-		}
+	relSlash := filepath.ToSlash(rel)
+	if IsIgnoredRelPath(relSlash) {
+		return true
 	}
 
 	return false

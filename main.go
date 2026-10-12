@@ -65,6 +65,9 @@ func main() {
 		func() { app.ShowWindow() },
 		func() { _ = app.TriggerSync() },
 		func() { _ = app.TriggerStop() },
+		func(minutes int) { _ = app.PauseSync(minutes) },
+		func() { _ = app.ResumeSync() },
+		func() bool { return app.IsPaused() },
 		func() { app.Quit() },
 	)
 	if err == nil {

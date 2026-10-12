@@ -254,6 +254,16 @@ async function loadStatus() {
         elDel.checked = !!cfg.allow_remote_deletion;
       }
 
+      const elNotif = document.getElementById('cfgNotificationsEnabled');
+      if (elNotif && elNotif !== activeEl) {
+        elNotif.checked = cfg.notifications_enabled !== false;
+      }
+
+      const elRules = document.getElementById('cfgCustomIgnoreRules');
+      if (elRules && elRules !== activeEl) {
+        elRules.value = (cfg.custom_ignore_rules || []).join('\n');
+      }
+
       setValIfNotFocused('cfgMaxDeleteThreshold', cfg.max_delete_threshold || 20);
 
       if (cfg.sync_mode) {
@@ -270,28 +280,55 @@ async function loadStatus() {
     const btnSyncIcon = document.getElementById('btnSyncIcon');
     const btnSyncText = document.getElementById('btnSyncText');
     const btnStop = document.getElementById('btnStop');
+    const btnPause = document.getElementById('btnPause');
+    const btnPauseIcon = document.getElementById('btnPauseIcon');
+    const btnPauseText = document.getElementById('btnPauseText');
+    const menuResumeItem = document.getElementById('menuResumeItem');
 
-    if (data.is_syncing) {
-      sBanner.classList.add('syncing');
-      sMain.textContent = 'Идет синхронизация файлов...';
-      sSub.textContent = 'Проверка контрольных сумм MD5 и передача данных';
-      btnSync.disabled = true;
-      btnSyncIcon.innerHTML = '<div class="spinner"></div>';
-      btnSyncText.textContent = 'Синхронизация...';
-      btnStop.disabled = false;
-    } else {
+    if (data.is_paused) {
       sBanner.classList.remove('syncing');
-      sMain.textContent = data.last_sync_msg || 'Готов к работе';
-      sSub.textContent = 'Все файлы под надежной защитой Disconnect Guard';
-      btnSync.disabled = false;
-      btnSyncIcon.innerHTML = '🔄';
-      btnSyncText.textContent = 'Синхронизировать';
-      btnStop.disabled = true;
-      if (data.last_sync_time) {
-        sTime.textContent = 'Посл. синхронизация: ' + data.last_sync_time;
+      sBanner.classList.add('paused');
+      sMain.textContent = 'Синхронизация приостановлена';
+      sSub.textContent = data.paused_until ? `Пауза активна до ${data.paused_until} (нажмите «Возобновить»)` : 'Пауза активна вручную (до возобновления)';
+      if (btnPause) {
+        btnPause.classList.add('is-resuming');
+        if (btnPauseIcon) btnPauseIcon.textContent = '▶';
+        if (btnPauseText) btnPauseText.textContent = data.paused_until ? `Возобновить (${data.paused_until})` : 'Возобновить';
       }
-      const progressCard = document.getElementById('transferProgressCard');
-      if (progressCard) progressCard.style.display = 'none';
+      if (menuResumeItem) menuResumeItem.style.display = 'flex';
+      btnSync.disabled = true;
+      btnStop.disabled = true;
+    } else {
+      sBanner.classList.remove('paused');
+      if (btnPause) {
+        btnPause.classList.remove('is-resuming');
+        if (btnPauseIcon) btnPauseIcon.textContent = '⏸';
+        if (btnPauseText) btnPauseText.textContent = 'Пауза';
+      }
+      if (menuResumeItem) menuResumeItem.style.display = 'none';
+
+      if (data.is_syncing) {
+        sBanner.classList.add('syncing');
+        sMain.textContent = 'Идет синхронизация файлов...';
+        sSub.textContent = 'Проверка контрольных сумм MD5 и передача данных';
+        btnSync.disabled = true;
+        btnSyncIcon.innerHTML = '<div class="spinner"></div>';
+        btnSyncText.textContent = 'Синхронизация...';
+        btnStop.disabled = false;
+      } else {
+        sBanner.classList.remove('syncing');
+        sMain.textContent = data.last_sync_msg || 'Готов к работе';
+        sSub.textContent = 'Все файлы под надежной защитой Disconnect Guard';
+        btnSync.disabled = false;
+        btnSyncIcon.innerHTML = '🔄';
+        btnSyncText.textContent = 'Синхронизировать';
+        btnStop.disabled = true;
+        if (data.last_sync_time) {
+          sTime.textContent = 'Посл. синхронизация: ' + data.last_sync_time;
+        }
+        const progressCard = document.getElementById('transferProgressCard');
+        if (progressCard) progressCard.style.display = 'none';
+      }
     }
   } catch (err) {
     console.error('Failed to load status:', err);
@@ -343,6 +380,67 @@ async function triggerSync() {
     loadStatus();
   } catch (err) {
     appendLog(`[!] Ошибка запуска: ${err}`);
+  }
+}
+
+let isPauseDropdownOpen = false;
+
+function togglePauseDropdown(event) {
+  if (event) event.stopPropagation();
+  const btnPause = document.getElementById('btnPause');
+  if (btnPause && btnPause.classList.contains('is-resuming')) {
+    triggerResume();
+    return;
+  }
+  const menu = document.getElementById('pauseDropdownMenu');
+  if (menu) {
+    isPauseDropdownOpen = !isPauseDropdownOpen;
+    menu.classList.toggle('show', isPauseDropdownOpen);
+  }
+}
+
+function closePauseDropdown() {
+  const menu = document.getElementById('pauseDropdownMenu');
+  if (menu) {
+    isPauseDropdownOpen = false;
+    menu.classList.remove('show');
+  }
+}
+
+async function triggerPause(minutes) {
+  closePauseDropdown();
+  appendLog(`[*] Запрос приостановки синхронизации (${minutes > 0 ? minutes + ' мин.' : 'до включения вручную'})...`);
+  try {
+    if (window.go && window.go.main && window.go.main.App) {
+      await window.go.main.App.PauseSync(minutes);
+    }
+    loadStatus();
+  } catch (err) {
+    appendLog(`[!] Ошибка паузы: ${err}`);
+  }
+}
+
+async function triggerResume() {
+  closePauseDropdown();
+  appendLog('[*] Запрос возобновления синхронизации...');
+  try {
+    if (window.go && window.go.main && window.go.main.App) {
+      await window.go.main.App.ResumeSync();
+    }
+    loadStatus();
+  } catch (err) {
+    appendLog(`[!] Ошибка возобновления: ${err}`);
+  }
+}
+
+async function openSyncIgnoreFile() {
+  try {
+    if (window.go && window.go.main && window.go.main.App) {
+      await window.go.main.App.OpenSyncIgnoreFile();
+      appendLog('[+] Файл .syncignore открыт для редактирования в Блокноте.');
+    }
+  } catch (err) {
+    appendLog(`[!] Не удалось открыть .syncignore: ${err}`);
   }
 }
 
@@ -486,6 +584,9 @@ async function saveSettings() {
   const maxDel = parseInt(document.getElementById('cfgMaxDeleteThreshold').value) || 20;
   const concUploads = parseInt(document.getElementById('cfgConcurrentUploads').value) || 4;
 
+  const rawRules = document.getElementById('cfgCustomIgnoreRules') ? document.getElementById('cfgCustomIgnoreRules').value : '';
+  const customIgnoreRules = rawRules.split('\n').map(s => s.trim()).filter(Boolean);
+
   const cfg = {
     local_folder: document.getElementById('cfgLocalFolder').value.trim(),
     remote_folder_id: document.getElementById('cfgRemoteFolder').value.trim() || 'root',
@@ -493,6 +594,8 @@ async function saveSettings() {
     autostart: document.getElementById('cfgAutostart').checked,
     realtime_watch: document.getElementById('cfgRealtimeWatch').checked,
     concurrent_uploads: concUploads,
+    custom_ignore_rules: customIgnoreRules,
+    notifications_enabled: document.getElementById('cfgNotificationsEnabled') ? document.getElementById('cfgNotificationsEnabled').checked : true,
     sync_mode: currentSyncMode,
     safety_shield: true,
     allow_remote_deletion: document.getElementById('cfgAllowRemoteDeletion').checked,
@@ -506,6 +609,14 @@ async function saveSettings() {
     appendLog(`[!] Ошибка сохранения: ${err}`);
   }
 }
+
+// Close pause dropdown when clicking outside
+document.addEventListener('click', (e) => {
+  const wrapper = document.querySelector('.pause-dropdown-wrapper');
+  if (wrapper && !wrapper.contains(e.target)) {
+    closePauseDropdown();
+  }
+});
 
 // Event Listeners for Wails Runtime
 window.addEventListener('DOMContentLoaded', () => {

@@ -87,18 +87,21 @@ type SyncEngineGo struct {
 	md5Mu            sync.RWMutex
 	concurrency      int
 	progressCallback func(SyncProgress)
+	ignoreMatcher    *IgnoreMatcher
 }
 
 func NewSyncEngineGo(srv *drive.Service, db *Database, localRoot, remoteRoot string, logCb func(string)) *SyncEngineGo {
+	cfg := GetConfig()
 	return &SyncEngineGo{
-		srv:         srv,
-		db:          db,
-		localRoot:   localRoot,
-		remoteRoot:  remoteRoot,
-		foldersMap:  make(map[string]string),
-		md5Cache:    make(map[string]string),
-		logCallback: logCb,
-		concurrency: 4,
+		srv:           srv,
+		db:            db,
+		localRoot:     localRoot,
+		remoteRoot:    remoteRoot,
+		foldersMap:    make(map[string]string),
+		md5Cache:      make(map[string]string),
+		logCallback:   logCb,
+		concurrency:   4,
+		ignoreMatcher: NewIgnoreMatcher(localRoot, cfg.CustomIgnoreRules),
 	}
 }
 
@@ -113,6 +116,10 @@ func (s *SyncEngineGo) SetConcurrency(c int) {
 
 func (s *SyncEngineGo) SetProgressCallback(cb func(SyncProgress)) {
 	s.progressCallback = cb
+}
+
+func (s *SyncEngineGo) SetIgnoreMatcher(m *IgnoreMatcher) {
+	s.ignoreMatcher = m
 }
 
 func (s *SyncEngineGo) log(msg string) {
@@ -330,6 +337,15 @@ func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]Fil
 		}
 
 		name := d.Name()
+		cleanRel := filepath.ToSlash(path)
+
+		if s.ignoreMatcher != nil && s.ignoreMatcher.ShouldIgnore(cleanRel, d.IsDir()) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+
 		if d.IsDir() {
 			if strings.HasPrefix(name, ".") || name == "__pycache__" || name == "$RECYCLE.BIN" || name == "System Volume Information" || name == "node_modules" {
 				return fs.SkipDir
@@ -337,7 +353,6 @@ func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]Fil
 			return nil
 		}
 
-		cleanRel := filepath.ToSlash(path)
 		if IsIgnoredRelPath(cleanRel) {
 			return nil
 		}
@@ -392,6 +407,9 @@ func (s *SyncEngineGo) ScanLocalDelta(ctx context.Context, stored map[string]Fil
 
 	// Check for files deleted locally that exist in DB, skipping ignored/temporary patterns
 	for p := range stored {
+		if s.ignoreMatcher != nil && s.ignoreMatcher.ShouldIgnore(p, false) {
+			continue
+		}
 		if IsIgnoredRelPath(p) {
 			continue
 		}

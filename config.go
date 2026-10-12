@@ -7,17 +7,29 @@ import (
 )
 
 type Config struct {
-	LocalFolder         string `json:"local_folder"`
-	RemoteFolderID      string `json:"remote_folder_id"`
-	SyncIntervalSeconds int    `json:"sync_interval_seconds"`
-	Autostart           bool   `json:"autostart"`
-	DryRun              bool   `json:"dry_run"`
-	SyncMode            string `json:"sync_mode"` // "local_master" or "two_way"
-	SafetyShield        bool   `json:"safety_shield"`
-	AllowRemoteDeletion bool   `json:"allow_remote_deletion"`
-	MaxDeleteThreshold  int    `json:"max_delete_threshold"`
-	RealtimeWatch       bool   `json:"realtime_watch"`
-	ConcurrentUploads   int    `json:"concurrent_uploads"`
+	LocalFolder          string   `json:"local_folder"`
+	RemoteFolderID       string   `json:"remote_folder_id"`
+	SyncIntervalSeconds  int      `json:"sync_interval_seconds"`
+	Autostart            bool     `json:"autostart"`
+	DryRun               bool     `json:"dry_run"`
+	SyncMode             string   `json:"sync_mode"` // "local_master" or "two_way"
+	SafetyShield         bool     `json:"safety_shield"`
+	AllowRemoteDeletion  bool     `json:"allow_remote_deletion"`
+	MaxDeleteThreshold   int      `json:"max_delete_threshold"`
+	RealtimeWatch        bool     `json:"realtime_watch"`
+	ConcurrentUploads    int      `json:"concurrent_uploads"`
+	CustomIgnoreRules    []string `json:"custom_ignore_rules"`
+	NotificationsEnabled bool     `json:"notifications_enabled"`
+}
+
+func DefaultIgnoreRules() []string {
+	return []string{
+		".git",
+		"node_modules",
+		"*.tmp",
+		"*.log",
+		"__pycache__",
+	}
 }
 
 func NormalizeConfig(cfg Config) Config {
@@ -41,6 +53,9 @@ func NormalizeConfig(cfg Config) Config {
 	} else if cfg.ConcurrentUploads > 16 {
 		cfg.ConcurrentUploads = 16
 	}
+	if len(cfg.CustomIgnoreRules) == 0 {
+		cfg.CustomIgnoreRules = DefaultIgnoreRules()
+	}
 	cfg.SafetyShield = true
 	return cfg
 }
@@ -59,17 +74,19 @@ func LoadConfig() Config {
 	cfgPath := ConfigPath()
 
 	appConfig = Config{
-		LocalFolder:         DefaultSyncFolderPath(),
-		RemoteFolderID:      "root",
-		SyncIntervalSeconds: 60,
-		Autostart:           false,
-		DryRun:              false,
-		SyncMode:            "local_master",
-		SafetyShield:        true,
-		AllowRemoteDeletion: false,
-		MaxDeleteThreshold:  20,
-		RealtimeWatch:       true,
-		ConcurrentUploads:   4,
+		LocalFolder:          DefaultSyncFolderPath(),
+		RemoteFolderID:       "root",
+		SyncIntervalSeconds:  60,
+		Autostart:            false,
+		DryRun:               false,
+		SyncMode:             "local_master",
+		SafetyShield:         true,
+		AllowRemoteDeletion:  false,
+		MaxDeleteThreshold:   20,
+		RealtimeWatch:        true,
+		ConcurrentUploads:    4,
+		CustomIgnoreRules:    DefaultIgnoreRules(),
+		NotificationsEnabled: true,
 	}
 
 	data, err := os.ReadFile(cfgPath)
@@ -85,6 +102,12 @@ func LoadConfig() Config {
 		}
 		if _, hasConc := rawMap["concurrent_uploads"]; !hasConc {
 			appConfig.ConcurrentUploads = 4
+		}
+		if _, hasNotif := rawMap["notifications_enabled"]; !hasNotif {
+			appConfig.NotificationsEnabled = true
+		}
+		if _, hasRules := rawMap["custom_ignore_rules"]; !hasRules || len(appConfig.CustomIgnoreRules) == 0 {
+			appConfig.CustomIgnoreRules = DefaultIgnoreRules()
 		}
 		appConfig = NormalizeConfig(appConfig)
 	} else {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -26,8 +27,12 @@ type App struct {
 	watcher          *FileWatcher
 	syncMutex        sync.Mutex
 	authMutex        sync.Mutex
+	pauseMutex       sync.Mutex
 	isAuthenticating bool
 	isSyncing        bool
+	isPaused         bool
+	pausedUntil      time.Time
+	pauseTimer       *time.Timer
 	syncCancel       context.CancelFunc
 	lastSyncTime     string
 	lastSyncMsg      string
@@ -58,7 +63,10 @@ func (a *App) ensureWatcher() {
 		a.watcher = nil
 	}
 
-	w, err := NewFileWatcher(cleanFolder, func() {
+	w, err := NewFileWatcher(cleanFolder, cfg.CustomIgnoreRules, func() {
+		if a.IsPaused() {
+			return
+		}
 		if IsAuthenticated() {
 			_ = a.TriggerSync()
 		}
@@ -178,10 +186,101 @@ func (a *App) updateSyncResult(timeStr, msg string) {
 	a.syncMutex.Unlock()
 }
 
+func (a *App) IsPaused() bool {
+	a.pauseMutex.Lock()
+	defer a.pauseMutex.Unlock()
+	if !a.isPaused {
+		return false
+	}
+	if !a.pausedUntil.IsZero() && time.Now().After(a.pausedUntil) {
+		a.isPaused = false
+		a.pausedUntil = time.Time{}
+		return false
+	}
+	return true
+}
+
+func (a *App) PauseSync(durationMinutes int) error {
+	a.pauseMutex.Lock()
+	a.isPaused = true
+	if a.pauseTimer != nil {
+		a.pauseTimer.Stop()
+		a.pauseTimer = nil
+	}
+
+	var msg string
+	if durationMinutes > 0 {
+		a.pausedUntil = time.Now().Add(time.Duration(durationMinutes) * time.Minute)
+		a.pauseTimer = time.AfterFunc(time.Duration(durationMinutes)*time.Minute, func() {
+			_ = a.ResumeSync()
+		})
+		msg = fmt.Sprintf("[*] Синхронизация приостановлена на %d мин. (до %s)", durationMinutes, a.pausedUntil.Format("15:04:05"))
+	} else {
+		a.pausedUntil = time.Time{}
+		msg = "[*] Синхронизация приостановлена вручную до возобновления."
+	}
+	a.pauseMutex.Unlock()
+
+	_ = a.TriggerStop()
+
+	a.broadcast(msg)
+	if a.tray != nil {
+		a.tray.UpdateTooltip("Google Sync Lite: " + msg)
+	}
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "status-updated")
+	}
+	return nil
+}
+
+func (a *App) ResumeSync() error {
+	a.pauseMutex.Lock()
+	a.isPaused = false
+	a.pausedUntil = time.Time{}
+	if a.pauseTimer != nil {
+		a.pauseTimer.Stop()
+		a.pauseTimer = nil
+	}
+	a.pauseMutex.Unlock()
+
+	a.broadcast("[+] Синхронизация возобновлена.")
+	if a.tray != nil {
+		a.tray.UpdateTooltip("Google Sync Lite: Работает")
+	}
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "status-updated")
+	}
+	return nil
+}
+
+func (a *App) OpenSyncIgnoreFile() error {
+	cfg := GetConfig()
+	folder := cfg.LocalFolder
+	if folder == "" {
+		return fmt.Errorf("локальная папка синхронизации не задана")
+	}
+	ignoreFile := filepath.Join(folder, ".syncignore")
+	if _, err := os.Stat(ignoreFile); os.IsNotExist(err) {
+		content := `# Google Sync Lite - .syncignore
+# Правила исключения файлов и папок (подобно .gitignore).
+# Поддерживаются маски (*, ?) и имена папок со слэшем (node_modules/).
+# Строки, начинающиеся с #, игнорируются.
+
+node_modules/
+.git/
+.vscode/
+*.tmp
+*.log
+~$*
+temp/
+`
+		_ = os.WriteFile(ignoreFile, []byte(content), 0644)
+	}
+	return exec.Command("notepad.exe", ignoreFile).Start()
+}
+
 func (a *App) GetStatus() map[string]interface{} {
 	a.syncMutex.Lock()
-	defer a.syncMutex.Unlock()
-
 	lastTime := a.lastSyncTime
 	lastMsg := a.lastSyncMsg
 	if lastTime == "" && a.db != nil {
@@ -190,13 +289,33 @@ func (a *App) GetStatus() map[string]interface{} {
 	if lastMsg == "" && a.db != nil {
 		lastMsg = a.db.GetMeta("last_sync_msg")
 	}
+	isSyncing := a.isSyncing
+	a.syncMutex.Unlock()
+
+	isPaused := a.IsPaused()
+	var pauseRemainingSec int64 = 0
+	pausedUntilStr := ""
+	if isPaused {
+		a.pauseMutex.Lock()
+		if !a.pausedUntil.IsZero() {
+			rem := time.Until(a.pausedUntil)
+			if rem > 0 {
+				pauseRemainingSec = int64(rem.Seconds())
+				pausedUntilStr = a.pausedUntil.Format("15:04")
+			}
+		}
+		a.pauseMutex.Unlock()
+	}
 
 	return map[string]interface{}{
-		"authenticated":  IsAuthenticated(),
-		"config":         GetConfig(),
-		"is_syncing":     a.isSyncing,
-		"last_sync_time": lastTime,
-		"last_sync_msg":  lastMsg,
+		"authenticated":           IsAuthenticated(),
+		"config":                  GetConfig(),
+		"is_syncing":              isSyncing,
+		"is_paused":               isPaused,
+		"paused_until":            pausedUntilStr,
+		"pause_remaining_seconds": pauseRemainingSec,
+		"last_sync_time":          lastTime,
+		"last_sync_msg":           lastMsg,
 	}
 }
 
@@ -234,6 +353,11 @@ func (a *App) TriggerAuth() error {
 }
 
 func (a *App) TriggerSync() error {
+	if a.IsPaused() {
+		a.broadcast("[*] Синхронизация сейчас приостановлена (на паузе).")
+		return nil
+	}
+
 	a.syncMutex.Lock()
 	if a.isSyncing {
 		a.syncMutex.Unlock()
@@ -265,6 +389,9 @@ func (a *App) TriggerSync() error {
 			msg := fmt.Sprintf("[!] Ошибка подключения к Google Drive: %v", err)
 			a.broadcast(msg)
 			a.updateSyncResult("", msg)
+			if a.tray != nil {
+				a.tray.ShowNotification("Google Sync Lite", "Ошибка подключения к Google Drive", "error")
+			}
 			return
 		}
 
@@ -281,12 +408,24 @@ func (a *App) TriggerSync() error {
 				msg := fmt.Sprintf("[!] Ошибка синхронизации: %v", err)
 				a.updateSyncResult("", msg)
 				a.broadcast(msg)
+				if cfg.NotificationsEnabled && a.tray != nil {
+					a.tray.ShowNotification("Google Sync Lite", fmt.Sprintf("Ошибка: %v", err), "error")
+				}
 			}
 		} else {
 			msg := fmt.Sprintf("[+] Готово! Проверено: %d, Загружено: %d, Скачано: %d, Удалено: %d",
 				summary.VerifiedCount, summary.UploadedCount, summary.DownloadCount, summary.DeletedCount)
 			a.updateSyncResult(time.Now().Format("15:04:05"), msg)
 			a.broadcast(msg)
+			if cfg.NotificationsEnabled && a.tray != nil {
+				if summary.UploadedCount > 0 || summary.DownloadCount > 0 || summary.DeletedCount > 0 {
+					a.tray.ShowNotification(
+						"Google Sync Lite",
+						fmt.Sprintf("Синхронизация завершена: +%d / -%d / ~%d", summary.UploadedCount, summary.DeletedCount, summary.DownloadCount),
+						"info",
+					)
+				}
+			}
 		}
 	}()
 
@@ -564,6 +703,10 @@ func (a *App) backgroundTicker() {
 		time.Sleep(interval)
 
 		if IsAuthenticated() {
+			if a.IsPaused() {
+				continue
+			}
+
 			a.syncMutex.Lock()
 			if a.isSyncing {
 				a.syncMutex.Unlock()
@@ -600,10 +743,22 @@ func (a *App) backgroundTicker() {
 							summary.VerifiedCount, summary.UploadedCount, summary.DownloadCount, summary.DeletedCount)
 						a.updateSyncResult(time.Now().Format("15:04:05"), msg)
 						a.broadcast(msg)
+						if cfg.NotificationsEnabled && a.tray != nil {
+							if summary.UploadedCount > 0 || summary.DownloadCount > 0 || summary.DeletedCount > 0 {
+								a.tray.ShowNotification(
+									"Google Sync Lite",
+									fmt.Sprintf("Синхронизация завершена: +%d / -%d / ~%d", summary.UploadedCount, summary.DeletedCount, summary.DownloadCount),
+									"info",
+								)
+							}
+						}
 					} else if err != nil {
 						msg := fmt.Sprintf("[!] Ошибка фоновой синхронизации: %v", err)
 						a.updateSyncResult("", msg)
 						a.broadcast(msg)
+						if cfg.NotificationsEnabled && a.tray != nil {
+							a.tray.ShowNotification("Google Sync Lite", fmt.Sprintf("Ошибка фоновой синхронизации: %v", err), "error")
+						}
 					}
 				}
 			}()

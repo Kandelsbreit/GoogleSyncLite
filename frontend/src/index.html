@@ -21,7 +21,7 @@
         </div>
         <span>Google Sync Lite</span>
       </div>
-      <span class="version-tag">v1.4.0</span>
+      <span class="version-tag">v1.5.0</span>
       <div class="safety-pill">
         <span class="safety-dot"></span>
         <span>ЩИТ БЕЗОПАСНОСТИ: АКТИВЕН</span>
@@ -157,17 +157,32 @@
         <!-- Action Cards Grid -->
         <div class="card">
           <div class="card-title">
-            <span>Быстрые действия</span>
+            <span>Управление синхронизацией</span>
           </div>
-          <div class="actions-grid">
+          <div class="sync-controls-row">
             <button class="btn btn-primary" id="btnSync" onclick="triggerSync()">
               <span id="btnSyncIcon">🔄</span>
               <span id="btnSyncText">Синхронизировать</span>
             </button>
+            <div class="pause-dropdown-wrapper">
+              <button class="btn btn-warning" id="btnPause" onclick="togglePauseDropdown()">
+                <span id="btnPauseIcon">⏸</span>
+                <span id="btnPauseText">Пауза</span>
+                <span class="dropdown-arrow">▼</span>
+              </button>
+              <div class="pause-dropdown-menu" id="pauseDropdownMenu">
+                <div class="pause-menu-item" onclick="triggerPause(60)">⏸ На 1 час</div>
+                <div class="pause-menu-item" onclick="triggerPause(120)">⏸ На 2 часа</div>
+                <div class="pause-menu-item" onclick="triggerPause(0)">⏸ Вручную (до включения)</div>
+                <div class="pause-menu-item resume-item" id="menuResumeItem" onclick="triggerResume()" style="display: none;">▶ Возобновить сейчас</div>
+              </div>
+            </div>
             <button class="btn btn-danger" id="btnStop" onclick="triggerStop()" disabled>
               <span>⏹</span>
               <span>Остановить</span>
             </button>
+          </div>
+          <div class="secondary-actions-grid" style="margin-top: 12px;">
             <button class="btn" onclick="triggerVerify()">
               <span>🛡️</span>
               <span>Самопроверка MD5</span>
@@ -304,6 +319,17 @@
             </label>
           </div>
 
+          <div class="switch-row" style="margin-top: 14px;">
+            <div class="switch-label-wrap">
+              <span class="switch-title">Всплывающие уведомления Windows (Action Center)</span>
+              <span class="switch-desc">Уведомлять в трее Windows о завершении синхронизации и возможных ошибках.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="cfgNotificationsEnabled" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+
           <div class="form-group" style="margin-top: 14px;">
             <label class="form-label">Интервал проверки изменений (минуты)</label>
             <input type="number" id="cfgInterval" min="1" max="1440" style="max-width: 130px;">
@@ -324,6 +350,25 @@
             </select>
             <span style="font-size: 11px; color: var(--text-muted); margin-top: 5px; display: block;">
               Параллельная отправка ускоряет передачу сотен и тысяч файлов в 3-6 раз.
+            </span>
+          </div>
+        </div>
+
+        <!-- Ignore Rules Card -->
+        <div class="card">
+          <div class="card-title">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span>🚫 Исключения и правила (.syncignore)</span>
+            </div>
+            <button class="btn btn-sm" onclick="openSyncIgnoreFile()" title="Открыть или создать файл .syncignore в блокноте">
+              📝 Открыть .syncignore
+            </button>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Пользовательские маски и папки для пропуска (по одной на строку):</label>
+            <textarea id="cfgCustomIgnoreRules" class="form-textarea" rows="4" placeholder="node_modules/&#10;.git/&#10;*.tmp&#10;*.log"></textarea>
+            <span style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+              Указанные папки (например, <code>node_modules/</code> или <code>.git/</code>) отсекаются мгновенно без перебора вложенных файлов. Файл <code>.syncignore</code> в корне локальной папки также учитывается автоматически.
             </span>
           </div>
         </div>
