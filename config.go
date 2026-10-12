@@ -20,6 +20,7 @@ type Config struct {
 	ConcurrentUploads    int      `json:"concurrent_uploads"`
 	CustomIgnoreRules    []string `json:"custom_ignore_rules"`
 	NotificationsEnabled bool     `json:"notifications_enabled"`
+	BandwidthLimitKBPS   int      `json:"bandwidth_limit_kbps"`
 }
 
 func DefaultIgnoreRules() []string {
@@ -56,6 +57,9 @@ func NormalizeConfig(cfg Config) Config {
 	if len(cfg.CustomIgnoreRules) == 0 {
 		cfg.CustomIgnoreRules = DefaultIgnoreRules()
 	}
+	if cfg.BandwidthLimitKBPS < 0 {
+		cfg.BandwidthLimitKBPS = 0
+	}
 	cfg.SafetyShield = true
 	return cfg
 }
@@ -87,6 +91,7 @@ func LoadConfig() Config {
 		ConcurrentUploads:    4,
 		CustomIgnoreRules:    DefaultIgnoreRules(),
 		NotificationsEnabled: true,
+		BandwidthLimitKBPS:   0,
 	}
 
 	data, err := os.ReadFile(cfgPath)
@@ -108,6 +113,9 @@ func LoadConfig() Config {
 		}
 		if _, hasRules := rawMap["custom_ignore_rules"]; !hasRules || len(appConfig.CustomIgnoreRules) == 0 {
 			appConfig.CustomIgnoreRules = DefaultIgnoreRules()
+		}
+		if _, hasBandwidth := rawMap["bandwidth_limit_kbps"]; !hasBandwidth {
+			appConfig.BandwidthLimitKBPS = 0
 		}
 		appConfig = NormalizeConfig(appConfig)
 	} else {

@@ -21,7 +21,7 @@
         </div>
         <span>Google Sync Lite</span>
       </div>
-      <span class="version-tag">v1.5.0</span>
+      <span class="version-tag">v1.6.0</span>
       <div class="safety-pill">
         <span class="safety-dot"></span>
         <span>ЩИТ БЕЗОПАСНОСТИ: АКТИВЕН</span>
@@ -241,6 +241,23 @@
           </div>
         </div>
 
+        <!-- Recent Files Widget Card -->
+        <div class="card" id="recentFilesCard">
+          <div class="card-title">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+              </svg>
+              <span>Недавно переданные файлы</span>
+            </div>
+            <button class="btn-icon-subtle" onclick="loadRecentFiles()" title="Обновить список">🔄</button>
+          </div>
+          <div class="recent-files-list" id="recentFilesList">
+            <div class="recent-files-empty">Синхронизированных файлов пока нет.</div>
+          </div>
+        </div>
+
         <!-- Activity Stream Card -->
         <div class="card">
           <div class="card-title">
@@ -350,6 +367,21 @@
             </select>
             <span style="font-size: 11px; color: var(--text-muted); margin-top: 5px; display: block;">
               Параллельная отправка ускоряет передачу сотен и тысяч файлов в 3-6 раз.
+            </span>
+          </div>
+
+          <div class="form-group" style="margin-top: 14px;">
+            <label class="form-label">Ограничение скорости отдачи (Bandwidth Rate Limiter):</label>
+            <select id="cfgBandwidthLimit" class="form-select" style="max-width: 280px;">
+              <option value="0" selected>Без ограничений (максимум)</option>
+              <option value="512">512 КБ/с (~4 Мбит/с)</option>
+              <option value="1024">1 МБ/с (~8 Мбит/с)</option>
+              <option value="2048">2 МБ/с (~16 Мбит/с)</option>
+              <option value="5120">5 МБ/с (~40 Мбит/с)</option>
+              <option value="10240">10 МБ/с (~80 Мбит/с)</option>
+            </select>
+            <span style="font-size: 11px; color: var(--text-muted); margin-top: 5px; display: block;">
+              Ограничивает скорость передачи, чтобы синхронизация не перегружала сеть во время работы или игр.
             </span>
           </div>
         </div>

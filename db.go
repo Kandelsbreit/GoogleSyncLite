@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"sync"
 	"time"
 
@@ -16,6 +17,16 @@ type FileState struct {
 	Size         int64
 	IsDir        bool
 	LastSyncedAt float64
+}
+
+type RecentFileItem struct {
+	ID            int64  `json:"id"`
+	RelPath       string `json:"rel_path"`
+	Action        string `json:"action"` // "upload", "download", "delete"
+	Size          int64  `json:"size"`
+	SizeFormatted string `json:"size_formatted"`
+	Timestamp     string `json:"timestamp"`
+	TimeAgo       string `json:"time_ago"`
 }
 
 type Database struct {
@@ -51,6 +62,15 @@ func OpenDatabase(path string) (*Database, error) {
 			key TEXT PRIMARY KEY,
 			value TEXT
 		);
+
+		CREATE TABLE IF NOT EXISTS recent_files (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			rel_path TEXT,
+			action TEXT,
+			size INTEGER,
+			synced_at INTEGER
+		);
+		CREATE INDEX IF NOT EXISTS idx_recent_synced_at ON recent_files(synced_at DESC);
 	`)
 	if err != nil {
 		db.Close()
@@ -212,4 +232,81 @@ func (d *Database) RemoveFilesBatch(relPaths []string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+func (d *Database) AddRecentFile(relPath, action string, size int64) error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	d.lock.Lock()
+	defer d.lock.Unlock()
+
+	now := time.Now().Unix()
+	_, err := d.db.Exec(`
+		INSERT INTO recent_files (rel_path, action, size, synced_at)
+		VALUES (?, ?, ?, ?);
+	`, relPath, action, size, now)
+	if err != nil {
+		return err
+	}
+
+	// Keep only the latest 100 entries so the table remains lean and fast
+	_, _ = d.db.Exec(`
+		DELETE FROM recent_files WHERE id NOT IN (
+			SELECT id FROM recent_files ORDER BY synced_at DESC, id DESC LIMIT 100
+		);
+	`)
+	return nil
+}
+
+func (d *Database) GetRecentFiles(limit int) ([]RecentFileItem, error) {
+	if d == nil || d.db == nil {
+		return []RecentFileItem{}, nil
+	}
+	d.lock.Lock()
+	defer d.lock.Unlock()
+
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+
+	rows, err := d.db.Query(`
+		SELECT id, rel_path, action, size, synced_at
+		FROM recent_files
+		ORDER BY synced_at DESC, id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return []RecentFileItem{}, err
+	}
+	defer rows.Close()
+
+	var items []RecentFileItem
+	now := time.Now().Unix()
+	for rows.Next() {
+		var it RecentFileItem
+		var syncedAt int64
+		if err := rows.Scan(&it.ID, &it.RelPath, &it.Action, &it.Size, &syncedAt); err != nil {
+			return items, err
+		}
+		it.SizeFormatted = FormatBytes(it.Size)
+		t := time.Unix(syncedAt, 0)
+		it.Timestamp = t.Format("15:04:05")
+
+		diff := now - syncedAt
+		if diff < 60 {
+			it.TimeAgo = "только что"
+		} else if diff < 3600 {
+			it.TimeAgo = fmt.Sprintf("%d мин. назад", diff/60)
+		} else if diff < 86400 {
+			it.TimeAgo = fmt.Sprintf("%d ч. назад", diff/3600)
+		} else {
+			it.TimeAgo = t.Format("02.01 15:04")
+		}
+		items = append(items, it)
+	}
+	if items == nil {
+		items = []RecentFileItem{}
+	}
+	return items, nil
 }

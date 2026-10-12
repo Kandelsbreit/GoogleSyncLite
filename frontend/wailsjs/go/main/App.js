@@ -10,8 +10,16 @@ export function CreateDriveFolder(arg1, arg2) {
   return window['go']['main']['App']['CreateDriveFolder'](arg1, arg2);
 }
 
+export function GetAccountStorageInfo() {
+  return window['go']['main']['App']['GetAccountStorageInfo']();
+}
+
 export function GetDriveFolders() {
   return window['go']['main']['App']['GetDriveFolders']();
+}
+
+export function GetRecentFiles() {
+  return window['go']['main']['App']['GetRecentFiles']();
 }
 
 export function GetStatus() {
@@ -22,6 +30,10 @@ export function HideToTray() {
   return window['go']['main']['App']['HideToTray']();
 }
 
+export function IsPaused() {
+  return window['go']['main']['App']['IsPaused']();
+}
+
 export function MinimizeWindow() {
   return window['go']['main']['App']['MinimizeWindow']();
 }
@@ -30,8 +42,20 @@ export function OpenLocalFolder() {
   return window['go']['main']['App']['OpenLocalFolder']();
 }
 
+export function OpenSyncIgnoreFile() {
+  return window['go']['main']['App']['OpenSyncIgnoreFile']();
+}
+
+export function PauseSync(arg1) {
+  return window['go']['main']['App']['PauseSync'](arg1);
+}
+
 export function Quit() {
   return window['go']['main']['App']['Quit']();
+}
+
+export function ResumeSync() {
+  return window['go']['main']['App']['ResumeSync']();
 }
 
 export function SaveSettings(arg1) {

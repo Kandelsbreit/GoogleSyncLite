@@ -155,6 +155,8 @@ func (a *App) ensureEngine(ctx context.Context) (*SyncEngineGo, error) {
 	cfg := GetConfig()
 	engine := NewSyncEngineGo(srv, a.db, cfg.LocalFolder, cfg.RemoteFolderID, a.broadcast)
 	engine.SetConcurrency(cfg.ConcurrentUploads)
+	engine.SetBandwidthLimit(cfg.BandwidthLimitKBPS)
+	engine.SetIgnoreMatcher(NewIgnoreMatcher(cfg.LocalFolder, cfg.CustomIgnoreRules))
 	engine.SetProgressCallback(func(p SyncProgress) {
 		if a.ctx != nil {
 			runtime.EventsEmit(a.ctx, "sync-progress", p)
@@ -167,6 +169,13 @@ func (a *App) ensureEngine(ctx context.Context) (*SyncEngineGo, error) {
 func (a *App) GetAccountStorageInfo() (*StorageQuotaInfo, error) {
 	ctx := context.Background()
 	return GetAccountStorageInfo(ctx)
+}
+
+func (a *App) GetRecentFiles() ([]RecentFileItem, error) {
+	if a.db == nil {
+		return []RecentFileItem{}, nil
+	}
+	return a.db.GetRecentFiles(20)
 }
 
 func (a *App) updateSyncResult(timeStr, msg string) {

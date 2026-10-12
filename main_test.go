@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -546,6 +548,86 @@ func TestAppPauseResume(t *testing.T) {
 		t.Fatal("expected unpaused after final ResumeSync()")
 	}
 }
+
+func TestThrottledReader(t *testing.T) {
+	data := []byte("Hello rate limited world! This is a test chunk to verify that no bytes are lost during throttling.")
+	r := bytes.NewReader(data)
+
+	// Test 0 kbps = unlimited
+	unlimited := NewThrottledReader(r, 0)
+	buf, err := io.ReadAll(unlimited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(buf, data) {
+		t.Fatal("data mismatch in unlimited reader")
+	}
+
+	// Test with rate limiting (e.g. 50 KB/s)
+	r2 := bytes.NewReader(data)
+	throttled := NewThrottledReader(r2, 50)
+	buf2, err := io.ReadAll(throttled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(buf2, data) {
+		t.Fatal("data mismatch in throttled reader")
+	}
+}
+
+func TestRecentFilesDatabase(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "recent_test.db")
+	db, err := OpenDatabase(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Initial query should be empty
+	items, err := db.GetRecentFiles(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected 0 items initially, got %d", len(items))
+	}
+
+	// Add items
+	_ = db.AddRecentFile("docs/report.pdf", "upload", 1048576)
+	_ = db.AddRecentFile("images/photo.png", "download", 2097152)
+	_ = db.AddRecentFile("temp/old.log", "delete", 0)
+
+	items, err = db.GetRecentFiles(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(items))
+	}
+
+	// Check most recent is first
+	if items[0].RelPath != "temp/old.log" || items[0].Action != "delete" {
+		t.Errorf("unexpected first item: %+v", items[0])
+	}
+	if items[1].RelPath != "images/photo.png" || items[1].Action != "download" || items[1].SizeFormatted != "2.0 МБ" {
+		t.Errorf("unexpected second item: %+v", items[1])
+	}
+	if items[2].RelPath != "docs/report.pdf" || items[2].Action != "upload" || items[2].SizeFormatted != "1.0 МБ" {
+		t.Errorf("unexpected third item: %+v", items[2])
+	}
+
+	// Test App wrapper
+	app := NewApp(db)
+	appItems, err := app.GetRecentFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(appItems) != 3 {
+		t.Fatalf("expected 3 app items, got %d", len(appItems))
+	}
+}
+
 
 
 

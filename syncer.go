@@ -77,32 +77,90 @@ func (r rootedLocalFS) Open(name string) (fs.File, error) {
 
 type SyncEngineGo struct {
 	srv              *drive.Service
-	db               *Database
-	localRoot        string
-	remoteRoot       string
-	foldersMap       map[string]string // relPath -> remote folder ID
-	md5Cache         map[string]string // relPath -> cached MD5
-	logCallback      func(string)
-	foldersMu        sync.Mutex
-	md5Mu            sync.RWMutex
-	concurrency      int
-	progressCallback func(SyncProgress)
-	ignoreMatcher    *IgnoreMatcher
+	db                 *Database
+	localRoot          string
+	remoteRoot         string
+	foldersMap         map[string]string // relPath -> remote folder ID
+	md5Cache           map[string]string // relPath -> cached MD5
+	logCallback        func(string)
+	foldersMu          sync.Mutex
+	md5Mu              sync.RWMutex
+	concurrency        int
+	progressCallback   func(SyncProgress)
+	ignoreMatcher      *IgnoreMatcher
+	bandwidthLimitKBPS int
+}
+
+// ThrottledReader limits the read rate of data to a maximum KB/s.
+type ThrottledReader struct {
+	r                 io.Reader
+	maxBytesPerSecond int64
+	bytesReadInWindow int64
+	windowStart       time.Time
+}
+
+func NewThrottledReader(r io.Reader, maxKBPS int) io.Reader {
+	if maxKBPS <= 0 {
+		return r
+	}
+	return &ThrottledReader{
+		r:                 r,
+		maxBytesPerSecond: int64(maxKBPS) * 1024,
+		windowStart:       time.Now(),
+	}
+}
+
+func (tr *ThrottledReader) Read(p []byte) (int, error) {
+	if tr.maxBytesPerSecond <= 0 {
+		return tr.r.Read(p)
+	}
+
+	if int64(len(p)) > 32*1024 {
+		p = p[:32*1024]
+	}
+
+	n, err := tr.r.Read(p)
+	if n > 0 {
+		tr.bytesReadInWindow += int64(n)
+		elapsed := time.Since(tr.windowStart)
+		expectedDuration := time.Duration(float64(tr.bytesReadInWindow) / float64(tr.maxBytesPerSecond) * float64(time.Second))
+
+		if elapsed < expectedDuration {
+			sleepTime := expectedDuration - elapsed
+			if sleepTime > 0 {
+				time.Sleep(sleepTime)
+			}
+		}
+
+		if time.Since(tr.windowStart) >= time.Second {
+			tr.windowStart = time.Now()
+			tr.bytesReadInWindow = 0
+		}
+	}
+	return n, err
 }
 
 func NewSyncEngineGo(srv *drive.Service, db *Database, localRoot, remoteRoot string, logCb func(string)) *SyncEngineGo {
 	cfg := GetConfig()
 	return &SyncEngineGo{
-		srv:           srv,
-		db:            db,
-		localRoot:     localRoot,
-		remoteRoot:    remoteRoot,
-		foldersMap:    make(map[string]string),
-		md5Cache:      make(map[string]string),
-		logCallback:   logCb,
-		concurrency:   4,
-		ignoreMatcher: NewIgnoreMatcher(localRoot, cfg.CustomIgnoreRules),
+		srv:                srv,
+		db:                 db,
+		localRoot:          localRoot,
+		remoteRoot:         remoteRoot,
+		foldersMap:         make(map[string]string),
+		md5Cache:           make(map[string]string),
+		logCallback:        logCb,
+		concurrency:        4,
+		bandwidthLimitKBPS: cfg.BandwidthLimitKBPS,
+		ignoreMatcher:      NewIgnoreMatcher(localRoot, cfg.CustomIgnoreRules),
 	}
+}
+
+func (s *SyncEngineGo) SetBandwidthLimit(kbps int) {
+	if kbps < 0 {
+		kbps = 0
+	}
+	s.bandwidthLimitKBPS = kbps
 }
 
 func (s *SyncEngineGo) SetConcurrency(c int) {
@@ -973,12 +1031,24 @@ func (s *SyncEngineGo) UploadFile(ctx context.Context, localPath, parentID, remo
 			return nil, err
 		}
 
+		fi, _ := f.Stat()
+		var mediaOpts []googleapi.MediaOption
+		// For files >= 8 MB, use 8 MB chunk size for reliable resumable uploads
+		if fi != nil && fi.Size() >= 8*1024*1024 {
+			mediaOpts = append(mediaOpts, googleapi.ChunkSize(8*1024*1024))
+		}
+
+		var reader io.Reader = f
+		if s.bandwidthLimitKBPS > 0 {
+			reader = NewThrottledReader(f, s.bandwidthLimitKBPS)
+		}
+
 		driveFile := &drive.File{
 			Name:    remoteName,
 			Parents: []string{parentID},
 		}
 
-		res, lastErr = s.srv.Files.Create(driveFile).Media(f).Fields("id, name, md5Checksum, modifiedTime, size").Context(ctx).Do()
+		res, lastErr = s.srv.Files.Create(driveFile).Media(reader, mediaOpts...).Fields("id, name, md5Checksum, modifiedTime, size").Context(ctx).Do()
 		f.Close()
 
 		if lastErr == nil {
@@ -1014,7 +1084,19 @@ func (s *SyncEngineGo) UpdateFile(ctx context.Context, fileID, localPath string)
 			return nil, err
 		}
 
-		res, lastErr = s.srv.Files.Update(fileID, &drive.File{}).Media(f).Fields("id, name, md5Checksum, modifiedTime, size").Context(ctx).Do()
+		fi, _ := f.Stat()
+		var mediaOpts []googleapi.MediaOption
+		// For files >= 8 MB, use 8 MB chunk size for reliable resumable updates
+		if fi != nil && fi.Size() >= 8*1024*1024 {
+			mediaOpts = append(mediaOpts, googleapi.ChunkSize(8*1024*1024))
+		}
+
+		var reader io.Reader = f
+		if s.bandwidthLimitKBPS > 0 {
+			reader = NewThrottledReader(f, s.bandwidthLimitKBPS)
+		}
+
+		res, lastErr = s.srv.Files.Update(fileID, &drive.File{}).Media(reader, mediaOpts...).Fields("id, name, md5Checksum, modifiedTime, size").Context(ctx).Do()
 		f.Close()
 
 		if lastErr == nil {
@@ -1269,6 +1351,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 				}
 				if uploadOk {
 					summary.UploadedCount++
+					_ = s.db.AddRecentFile(path, "upload", loc.Size)
 				}
 			} else if hasRem && !hasLoc {
 				if syncMode == "two_way" {
@@ -1282,6 +1365,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 						if err := s.db.RemoveFile(path); err != nil {
 							return summary, err
 						}
+						_ = s.db.AddRecentFile(path, "delete", 0)
 						s.log(fmt.Sprintf("[-] Удалено локально вслед за Google Drive: %s", path))
 						summary.DeletedCount++
 						continue
@@ -1313,6 +1397,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 					}
 					if dlOk {
 						summary.DownloadCount++
+						_ = s.db.AddRecentFile(path, "download", rem.Size)
 					}
 				} else if syncMode == "local_master" {
 					if !cfg.AllowRemoteDeletion {
@@ -1328,6 +1413,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 						_, _ = s.srv.Files.Update(rem.ID, &drive.File{Trashed: true}).Context(ctx).Do()
 					}
 					_ = s.db.RemoveFile(path)
+					_ = s.db.AddRecentFile(path, "delete", 0)
 					summary.DeletedCount++
 				}
 			}
@@ -1401,6 +1487,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 					_, _ = s.srv.Files.Update(st.FileID, &drive.File{Trashed: true}).Context(ctx).Do()
 				}
 				_ = s.db.RemoveFile(delPath)
+				_ = s.db.AddRecentFile(delPath, "delete", 0)
 				summary.DeletedCount++
 			}
 		}
@@ -1684,6 +1771,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 					atomic.AddInt64(&processedBytes, loc.Size)
 					if uploadOk {
 						atomic.AddInt64(&uploadedOkCount, 1)
+						_ = s.db.AddRecentFile(path, "upload", loc.Size)
 					}
 					reportProgress(pathPkg.Base(path), false)
 				}
@@ -1764,6 +1852,7 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 			}
 			if dlOk {
 				summary.DownloadCount++
+				_ = s.db.AddRecentFile(relName, "download", rem.Size)
 			}
 		}
 	}

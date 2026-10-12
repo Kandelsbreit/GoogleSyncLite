@@ -6,17 +6,29 @@ export function ChooseLocalFolder():Promise<string>;
 
 export function CreateDriveFolder(arg1:string,arg2:string):Promise<main.FolderItem>;
 
+export function GetAccountStorageInfo():Promise<main.StorageQuotaInfo>;
+
 export function GetDriveFolders():Promise<Array<main.FolderItem>>;
+
+export function GetRecentFiles():Promise<Array<main.RecentFileItem>>;
 
 export function GetStatus():Promise<Record<string, any>>;
 
 export function HideToTray():Promise<void>;
 
+export function IsPaused():Promise<boolean>;
+
 export function MinimizeWindow():Promise<void>;
 
 export function OpenLocalFolder():Promise<void>;
 
+export function OpenSyncIgnoreFile():Promise<void>;
+
+export function PauseSync(arg1:number):Promise<void>;
+
 export function Quit():Promise<void>;
+
+export function ResumeSync():Promise<void>;
 
 export function SaveSettings(arg1:main.Config):Promise<void>;
 

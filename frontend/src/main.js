@@ -264,6 +264,11 @@ async function loadStatus() {
         elRules.value = (cfg.custom_ignore_rules || []).join('\n');
       }
 
+      const elBw = document.getElementById('cfgBandwidthLimit');
+      if (elBw && elBw !== activeEl) {
+        elBw.value = String(cfg.bandwidth_limit_kbps || 0);
+      }
+
       setValIfNotFocused('cfgMaxDeleteThreshold', cfg.max_delete_threshold || 20);
 
       if (cfg.sync_mode) {
@@ -583,6 +588,7 @@ async function saveSettings() {
   const intervalMin = parseInt(document.getElementById('cfgInterval').value) || 1;
   const maxDel = parseInt(document.getElementById('cfgMaxDeleteThreshold').value) || 20;
   const concUploads = parseInt(document.getElementById('cfgConcurrentUploads').value) || 4;
+  const bwLimit = parseInt(document.getElementById('cfgBandwidthLimit') ? document.getElementById('cfgBandwidthLimit').value : 0) || 0;
 
   const rawRules = document.getElementById('cfgCustomIgnoreRules') ? document.getElementById('cfgCustomIgnoreRules').value : '';
   const customIgnoreRules = rawRules.split('\n').map(s => s.trim()).filter(Boolean);
@@ -596,6 +602,7 @@ async function saveSettings() {
     concurrent_uploads: concUploads,
     custom_ignore_rules: customIgnoreRules,
     notifications_enabled: document.getElementById('cfgNotificationsEnabled') ? document.getElementById('cfgNotificationsEnabled').checked : true,
+    bandwidth_limit_kbps: bwLimit,
     sync_mode: currentSyncMode,
     safety_shield: true,
     allow_remote_deletion: document.getElementById('cfgAllowRemoteDeletion').checked,
@@ -607,6 +614,53 @@ async function saveSettings() {
     loadStatus();
   } catch (err) {
     appendLog(`[!] Ошибка сохранения: ${err}`);
+  }
+}
+
+// Recent Files Widget Engine
+async function loadRecentFiles() {
+  if (!window.go || !window.go.main || !window.go.main.App) return;
+
+  const container = document.getElementById('recentFilesList');
+  if (!container) return;
+
+  try {
+    const items = await window.go.main.App.GetRecentFiles();
+    if (!items || items.length === 0) {
+      container.innerHTML = '<div class="recent-files-empty">Синхронизированных файлов пока нет.</div>';
+      return;
+    }
+
+    let html = '';
+    for (const it of items) {
+      let icon = '↑';
+      let badgeClass = 'upload';
+      if (it.action === 'download') {
+        icon = '↓';
+        badgeClass = 'download';
+      } else if (it.action === 'delete') {
+        icon = '✕';
+        badgeClass = 'delete';
+      }
+
+      const sizeStr = it.action === 'delete' ? '' : (it.size_formatted || '');
+
+      html += `
+        <div class="recent-file-item" title="${escapeHtml(it.rel_path)}">
+          <div class="recent-file-left">
+            <span class="recent-file-action-badge ${badgeClass}">${icon}</span>
+            <span class="recent-file-name">${escapeHtml(it.rel_path)}</span>
+          </div>
+          <div class="recent-file-right">
+            ${sizeStr ? `<span class="recent-file-size">${escapeHtml(sizeStr)}</span>` : ''}
+            <span class="recent-file-time">${escapeHtml(it.time_ago || it.timestamp)}</span>
+          </div>
+        </div>
+      `;
+    }
+    container.innerHTML = html;
+  } catch (err) {
+    console.error('Failed to load recent files:', err);
   }
 }
 
@@ -625,10 +679,12 @@ window.addEventListener('DOMContentLoaded', () => {
     window.runtime.EventsOn('log', (msg) => {
       appendLog(msg);
       loadStatus();
+      loadRecentFiles();
     });
 
     window.runtime.EventsOn('status-updated', () => {
       loadStatus();
+      loadRecentFiles();
     });
 
     window.runtime.EventsOn('sync-progress', (p) => {
@@ -638,6 +694,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
   loadStatus();
   loadStorageQuota();
+  loadRecentFiles();
   setInterval(loadStatus, 2500);
+  setInterval(loadRecentFiles, 5000);
   setInterval(loadStorageQuota, 60000);
 });
