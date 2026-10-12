@@ -168,8 +168,7 @@ func (d *Database) BackupDatabase(backupPath string) error {
 	defer d.lock.Unlock()
 
 	_ = os.Remove(backupPath)
-	escapedPath := strings.ReplaceAll(backupPath, "'", "''")
-	_, err := d.db.Exec(fmt.Sprintf("VACUUM INTO '%s';", escapedPath))
+	_, err := d.db.Exec("VACUUM INTO ?;", backupPath)
 	return err
 }
 

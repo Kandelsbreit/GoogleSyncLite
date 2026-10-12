@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	crand "crypto/rand"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"math/rand"
+	"math/big"
 	"net"
 	"os"
 	pathPkg "path"
@@ -1029,8 +1030,11 @@ func calculateBackoffWithJitter(attempt int, baseDelay time.Duration) time.Durat
 		maxWait = 20 * time.Second
 	}
 	half := maxWait / 2
-	jitter := time.Duration(rand.Int63n(int64(half) + 1))
-	return half + jitter
+	n, err := crand.Int(crand.Reader, big.NewInt(int64(half)+1))
+	if err != nil {
+		return half
+	}
+	return half + time.Duration(n.Int64())
 }
 
 func isAuthOrTokenError(err error) bool {
