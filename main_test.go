@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/api/googleapi"
 )
 
 func TestHasherGo(t *testing.T) {
@@ -892,6 +895,109 @@ func TestDatabaseGetFileAndFormatTimeAgo(t *testing.T) {
 		t.Fatal("expected error for non-existent file revisions")
 	}
 }
+
+type dummyNetTimeoutError struct{}
+func (e dummyNetTimeoutError) Error() string   { return "i/o timeout" }
+func (e dummyNetTimeoutError) Timeout() bool   { return true }
+func (e dummyNetTimeoutError) Temporary() bool { return true }
+
+func TestResilientUnderTheHoodEngine(t *testing.T) {
+	// 1. isRetryableError tests
+	if !isRetryableError(&googleapi.Error{Code: 429}) {
+		t.Error("expected 429 to be retryable")
+	}
+	if !isRetryableError(&googleapi.Error{Code: 503}) {
+		t.Error("expected 503 to be retryable")
+	}
+	if isRetryableError(&googleapi.Error{Code: 404}) {
+		t.Error("expected 404 to NOT be retryable")
+	}
+	if !isRetryableError(dummyNetTimeoutError{}) {
+		t.Error("expected net.Error to be retryable")
+	}
+	if !isRetryableError(errors.New("read tcp: connection reset by peer")) {
+		t.Error("expected connection reset to be retryable")
+	}
+	if !isRetryableError(errors.New("unexpected EOF during transfer")) {
+		t.Error("expected unexpected EOF to be retryable")
+	}
+
+	// 2. Windows Sharing Violation tests
+	if !isWindowsSharingViolation(errors.New("The process cannot access the file because it is being used by another process.")) {
+		t.Error("expected sharing violation to be detected")
+	}
+	if isWindowsSharingViolation(errors.New("file not found")) {
+		t.Error("expected file not found to NOT be sharing violation")
+	}
+
+	// 3. calculateBackoffWithJitter tests
+	for i := 1; i <= 5; i++ {
+		backoff := calculateBackoffWithJitter(i, 400*time.Millisecond)
+		if backoff <= 0 {
+			t.Errorf("backoff should be positive, got %v", backoff)
+		}
+		if backoff > 21*time.Second {
+			t.Errorf("backoff should not exceed 20s, got %v", backoff)
+		}
+	}
+
+	// 4. CleanupStaleTempFiles tests
+	tmpDir := t.TempDir()
+	staleTmp := filepath.Join(tmpDir, "stale.tmp")
+	freshTmp := filepath.Join(tmpDir, "fresh.tmp")
+	regularFile := filepath.Join(tmpDir, "document.pdf")
+
+	_ = os.WriteFile(staleTmp, []byte("stale data"), 0644)
+	_ = os.WriteFile(freshTmp, []byte("fresh data"), 0644)
+	_ = os.WriteFile(regularFile, []byte("regular data"), 0644)
+
+	// Set staleTmp mtime to 2 hours ago
+	oldTime := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(staleTmp, oldTime, oldTime)
+
+	cleaned, err := CleanupStaleTempFiles(tmpDir, 1*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected 1 stale file cleaned, got %d", cleaned)
+	}
+	if _, err := os.Stat(staleTmp); !os.IsNotExist(err) {
+		t.Error("staleTmp should have been deleted")
+	}
+	if _, err := os.Stat(freshTmp); err != nil {
+		t.Error("freshTmp should NOT have been deleted")
+	}
+	if _, err := os.Stat(regularFile); err != nil {
+		t.Error("regularFile should NOT have been deleted")
+	}
+
+	// 5. Database Backup and Integrity check
+	dbPath := filepath.Join(t.TempDir(), "test_backup.db")
+	db, err := OpenDatabase(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_ = db.UpsertFile(FileState{
+		RelPath: "test.txt",
+		FileID:  "id1",
+		MD5:     "md51",
+		MTime:   123456,
+		Size:    100,
+	})
+
+	bakPath := filepath.Join(t.TempDir(), "test_backup.db.bak")
+	if err := db.BackupDatabase(bakPath); err != nil {
+		t.Fatalf("BackupDatabase failed: %v", err)
+	}
+
+	if !checkSQLiteIntegrity(bakPath) {
+		t.Fatal("backup database failed integrity check")
+	}
+}
+
 
 
 

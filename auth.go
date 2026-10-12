@@ -208,7 +208,34 @@ func GetDriveService(ctx context.Context) (*drive.Service, error) {
 		}
 	}
 
-	return drive.NewService(ctx, option.WithTokenSource(tokenSource))
+	httpClient := NewHardenedHTTPClient(ctx, tokenSource)
+	return drive.NewService(ctx, option.WithHTTPClient(httpClient))
+}
+
+func NewHardenedHTTPClient(ctx context.Context, tokenSource oauth2.TokenSource) *http.Client {
+	baseTransport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   15 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   25,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		ExpectContinueTimeout: 2 * time.Second,
+	}
+
+	oauthTransport := &oauth2.Transport{
+		Source: tokenSource,
+		Base:   baseTransport,
+	}
+
+	return &http.Client{
+		Transport: oauthTransport,
+	}
 }
 
 func IsAuthenticated() bool {

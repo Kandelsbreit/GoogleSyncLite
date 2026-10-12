@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"math/rand"
+	"net"
 	"os"
 	pathPkg "path"
 	"path/filepath"
@@ -90,6 +93,7 @@ type SyncEngineGo struct {
 	ignoreMatcher      *IgnoreMatcher
 	bandwidthLimitKBPS int
 	conflictStrategy   string
+	adaptiveThrottled  int32
 }
 
 // ThrottledReader limits the read rate of data to a maximum KB/s.
@@ -1003,6 +1007,32 @@ func (s *SyncEngineGo) DownloadFile(ctx context.Context, fileID, localDestPath, 
 	return nil
 }
 
+var ErrFileLocked = errors.New("файл заблокирован другим процессом Windows")
+
+func isWindowsSharingViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "sharing violation") ||
+		strings.Contains(errStr, "used by another process") ||
+		strings.Contains(errStr, "lock violation") ||
+		strings.Contains(errStr, "process cannot access the file")
+}
+
+func calculateBackoffWithJitter(attempt int, baseDelay time.Duration) time.Duration {
+	if attempt <= 0 {
+		attempt = 1
+	}
+	maxWait := baseDelay * (1 << attempt)
+	if maxWait > 20*time.Second {
+		maxWait = 20 * time.Second
+	}
+	half := maxWait / 2
+	jitter := time.Duration(rand.Int63n(int64(half) + 1))
+	return half + jitter
+}
+
 func isAuthOrTokenError(err error) bool {
 	if err == nil {
 		return false
@@ -1035,7 +1065,73 @@ func isRetryableError(err error) bool {
 			return true
 		}
 	}
+	// Detect transient network errors
+	if _, ok := err.(net.Error); ok {
+		return true
+	}
+	errStr := strings.ToLower(err.Error())
+	if strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "forcibly closed") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "unexpected eof") ||
+		strings.Contains(errStr, "eof") ||
+		strings.Contains(errStr, "handshake timeout") ||
+		strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "temporary failure") ||
+		strings.Contains(errStr, "network is unreachable") ||
+		strings.Contains(errStr, "bad record mac") {
+		return true
+	}
 	return false
+}
+
+func (s *SyncEngineGo) openLocalPathWithRetry(localPath string) (*os.File, error) {
+	var f *os.File
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		f, err = s.openLocalPath(localPath)
+		if err == nil {
+			return f, nil
+		}
+		if isWindowsSharingViolation(err) {
+			time.Sleep(time.Duration(attempt+1) * 250 * time.Millisecond)
+			continue
+		}
+		return nil, err
+	}
+	if isWindowsSharingViolation(err) {
+		return nil, ErrFileLocked
+	}
+	return nil, err
+}
+
+func CleanupStaleTempFiles(rootPath string, maxAge time.Duration) (int, error) {
+	if rootPath == "" {
+		return 0, nil
+	}
+	cleanRoot := filepath.Clean(rootPath)
+	if _, err := os.Stat(cleanRoot); err != nil {
+		return 0, err
+	}
+
+	count := 0
+	now := time.Now()
+	_ = filepath.WalkDir(cleanRoot, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".tmp_restore") || strings.HasSuffix(name, ".tmp_download") {
+			info, err := d.Info()
+			if err == nil && now.Sub(info.ModTime()) > maxAge {
+				if removeErr := os.Remove(p); removeErr == nil {
+					count++
+				}
+			}
+		}
+		return nil
+	})
+	return count, nil
 }
 
 func (s *SyncEngineGo) UploadFile(ctx context.Context, localPath, parentID, remoteName string) (*drive.File, error) {
@@ -1046,9 +1142,14 @@ func (s *SyncEngineGo) UploadFile(ctx context.Context, localPath, parentID, remo
 	var res *drive.File
 	var lastErr error
 
-	for attempt := 0; attempt < 3; attempt++ {
+	// If adaptive rate limiting was triggered by 429, wait briefly
+	if atomic.LoadInt32(&s.adaptiveThrottled) == 1 {
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	for attempt := 0; attempt < 5; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(1<<attempt) * 500 * time.Millisecond
+			backoff := calculateBackoffWithJitter(attempt, 400*time.Millisecond)
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
@@ -1056,8 +1157,11 @@ func (s *SyncEngineGo) UploadFile(ctx context.Context, localPath, parentID, remo
 			}
 		}
 
-		f, err := s.openLocalPath(localPath)
+		f, err := s.openLocalPathWithRetry(localPath)
 		if err != nil {
+			if errors.Is(err, ErrFileLocked) {
+				return nil, ErrFileLocked
+			}
 			return nil, err
 		}
 
@@ -1084,6 +1188,11 @@ func (s *SyncEngineGo) UploadFile(ctx context.Context, localPath, parentID, remo
 		if lastErr == nil {
 			return res, nil
 		}
+		if gErr, ok := lastErr.(*googleapi.Error); ok && gErr.Code == 429 {
+			if atomic.CompareAndSwapInt32(&s.adaptiveThrottled, 0, 1) {
+				s.log("[!] Обнаружен лимит запросов Google Drive (429 Too Many Requests). Включен адаптивный троттлинг.")
+			}
+		}
 		if !isRetryableError(lastErr) {
 			break
 		}
@@ -1099,9 +1208,13 @@ func (s *SyncEngineGo) UpdateFile(ctx context.Context, fileID, localPath string)
 	var res *drive.File
 	var lastErr error
 
-	for attempt := 0; attempt < 3; attempt++ {
+	if atomic.LoadInt32(&s.adaptiveThrottled) == 1 {
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	for attempt := 0; attempt < 5; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(1<<attempt) * 500 * time.Millisecond
+			backoff := calculateBackoffWithJitter(attempt, 400*time.Millisecond)
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
@@ -1109,8 +1222,11 @@ func (s *SyncEngineGo) UpdateFile(ctx context.Context, fileID, localPath string)
 			}
 		}
 
-		f, err := s.openLocalPath(localPath)
+		f, err := s.openLocalPathWithRetry(localPath)
 		if err != nil {
+			if errors.Is(err, ErrFileLocked) {
+				return nil, ErrFileLocked
+			}
 			return nil, err
 		}
 
@@ -1132,6 +1248,11 @@ func (s *SyncEngineGo) UpdateFile(ctx context.Context, fileID, localPath string)
 		if lastErr == nil {
 			return res, nil
 		}
+		if gErr, ok := lastErr.(*googleapi.Error); ok && gErr.Code == 429 {
+			if atomic.CompareAndSwapInt32(&s.adaptiveThrottled, 0, 1) {
+				s.log("[!] Обнаружен лимит запросов Google Drive (429 Too Many Requests). Включен адаптивный троттлинг.")
+			}
+		}
 		if !isRetryableError(lastErr) {
 			break
 		}
@@ -1152,6 +1273,10 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 	lastSyncTimeRFC := s.db.GetMeta("last_sync_rfc3339")
 	startTime := time.Now().UTC().Format(time.RFC3339)
 	cfg := GetConfig()
+
+	if cleaned, _ := CleanupStaleTempFiles(s.localRoot, 1*time.Hour); cleaned > 0 {
+		s.log(fmt.Sprintf("[*] Очищено устаревших временных файлов (.tmp): %d", cleaned))
+	}
 
 	s.log(fmt.Sprintf("[*] Быстрое дельта-сканирование (Режим: %s)...", func() string {
 		if syncMode == "local_master" {
@@ -1727,6 +1852,8 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 									} else {
 										atomic.StoreInt32(&anyOpFailed, 1)
 									}
+								} else if errors.Is(err, ErrFileLocked) {
+									s.log(fmt.Sprintf("[!] Файл '%s' временно занят другим приложением Windows, отложен до следующего сканирования.", path))
 								} else {
 									atomic.StoreInt32(&anyOpFailed, 1)
 									s.log(fmt.Sprintf("[!] Ошибка обновления файла %s в Google Drive: %v", path, err))
@@ -1825,8 +1952,12 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 											})
 											return
 										}
-										atomic.StoreInt32(&anyOpFailed, 1)
-										s.log(fmt.Sprintf("[!] Ошибка загрузки нового файла %s в Google Drive: %v", path, err))
+										if errors.Is(err, ErrFileLocked) {
+											s.log(fmt.Sprintf("[!] Файл '%s' временно занят другим приложением Windows, отложен до следующей синхронизации.", path))
+										} else {
+											atomic.StoreInt32(&anyOpFailed, 1)
+											s.log(fmt.Sprintf("[!] Ошибка загрузки нового файла %s в Google Drive: %v", path, err))
+										}
 									} else {
 										locMD5, _ := s.GetOrComputeMD5(workerCtx, path, loc)
 										if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {

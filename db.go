@@ -3,6 +3,8 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"io"
+	"os"
 	pathPkg "path"
 	"path/filepath"
 	"strings"
@@ -67,7 +69,51 @@ type Database struct {
 	lock sync.Mutex
 }
 
+func checkSQLiteIntegrity(dbPath string) bool {
+	testDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return false
+	}
+	defer testDB.Close()
+
+	var result string
+	row := testDB.QueryRow("PRAGMA integrity_check;")
+	if err := row.Scan(&result); err != nil {
+		return false
+	}
+	return result == "ok"
+}
+
+func copyFileHelper(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
 func OpenDatabase(path string) (*Database, error) {
+	// Pre-flight Self-Healing: Verify SQLite integrity if database file exists
+	if _, statErr := os.Stat(path); statErr == nil {
+		if !checkSQLiteIntegrity(path) {
+			bakPath := path + ".bak"
+			if _, bakStat := os.Stat(bakPath); bakStat == nil && checkSQLiteIntegrity(bakPath) {
+				// Base file corrupted! Move aside and restore from healthy backup
+				_ = os.Rename(path, fmt.Sprintf("%s.corrupted_%d", path, time.Now().Unix()))
+				_ = copyFileHelper(bakPath, path)
+			}
+		}
+	}
+
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -115,6 +161,16 @@ func OpenDatabase(path string) (*Database, error) {
 
 func (d *Database) Close() error {
 	return d.db.Close()
+}
+
+func (d *Database) BackupDatabase(backupPath string) error {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+
+	_ = os.Remove(backupPath)
+	escapedPath := strings.ReplaceAll(backupPath, "'", "''")
+	_, err := d.db.Exec(fmt.Sprintf("VACUUM INTO '%s';", escapedPath))
+	return err
 }
 
 func (d *Database) GetMeta(key string) string {

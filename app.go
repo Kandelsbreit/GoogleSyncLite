@@ -480,6 +480,10 @@ func (a *App) TriggerSync() error {
 				}
 			}
 		} else {
+			if a.db != nil {
+				bakPath := filepath.Join(filepath.Dir(DatabasePath()), "sync_state_go.db.bak")
+				_ = a.db.BackupDatabase(bakPath)
+			}
 			msg := fmt.Sprintf("[+] Готово! Проверено: %d, Загружено: %d, Скачано: %d, Удалено: %d",
 				summary.VerifiedCount, summary.UploadedCount, summary.DownloadCount, summary.DeletedCount)
 			a.updateSyncResult(time.Now().Format("15:04:05"), msg)
@@ -1028,6 +1032,10 @@ func (a *App) backgroundTicker() {
 					a.broadcast("[*] Плановая фоновая синхронизация...")
 					summary, err := engine.Sync(ctx, cfg.DryRun, cfg.SyncMode)
 					if err == nil && summary != nil {
+						if a.db != nil {
+							bakPath := filepath.Join(filepath.Dir(DatabasePath()), "sync_state_go.db.bak")
+							_ = a.db.BackupDatabase(bakPath)
+						}
 						msg := fmt.Sprintf("[+] Готово! Проверено: %d, Загружено: %d, Скачано: %d, Удалено: %d",
 							summary.VerifiedCount, summary.UploadedCount, summary.DownloadCount, summary.DeletedCount)
 						a.updateSyncResult(time.Now().Format("15:04:05"), msg)
