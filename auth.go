@@ -215,3 +215,94 @@ func IsAuthenticated() bool {
 	_, err := LoadSavedToken()
 	return err == nil
 }
+
+type StorageQuotaInfo struct {
+	UserEmail       string  `json:"user_email"`
+	UserName        string  `json:"user_name"`
+	UserPhoto       string  `json:"user_photo"`
+	LimitBytes      int64   `json:"limit_bytes"`
+	UsageBytes      int64   `json:"usage_bytes"`
+	UsageInDrive    int64   `json:"usage_in_drive"`
+	UsageInTrash    int64   `json:"usage_in_trash"`
+	UsagePercentage float64 `json:"usage_percentage"`
+	LimitFormatted  string  `json:"limit_formatted"`
+	UsageFormatted  string  `json:"usage_formatted"`
+	IsUnlimited     bool    `json:"is_unlimited"`
+}
+
+func FormatBytes(b int64) string {
+	if b < 0 {
+		return "0 Б"
+	}
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d Б", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	units := []string{"КБ", "МБ", "ГБ", "ТБ"}
+	if exp >= len(units) {
+		exp = len(units) - 1
+	}
+	return fmt.Sprintf("%.1f %s", float64(b)/float64(div), units[exp])
+}
+
+func FormatSpeed(bps float64) string {
+	if bps <= 0 {
+		return "0 Б/с"
+	}
+	const unit = 1024.0
+	if bps < unit {
+		return fmt.Sprintf("%.0f Б/с", bps)
+	}
+	div, exp := unit, 0
+	for n := bps / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	units := []string{"КБ/с", "МБ/с", "ГБ/с"}
+	if exp >= len(units) {
+		exp = len(units) - 1
+	}
+	return fmt.Sprintf("%.1f %s", bps/div, units[exp])
+}
+
+func GetAccountStorageInfo(ctx context.Context) (*StorageQuotaInfo, error) {
+	srv, err := GetDriveService(ctx)
+	if err != nil {
+		return nil, err
+	}
+	about, err := srv.About.Get().Fields("user(displayName, emailAddress, photoLink), storageQuota(limit, usage, usageInDrive, usageInDriveTrash)").Context(ctx).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	info := &StorageQuotaInfo{}
+	if about.User != nil {
+		info.UserName = about.User.DisplayName
+		info.UserEmail = about.User.EmailAddress
+		info.UserPhoto = about.User.PhotoLink
+	}
+	if about.StorageQuota != nil {
+		info.LimitBytes = about.StorageQuota.Limit
+		info.UsageBytes = about.StorageQuota.Usage
+		info.UsageInDrive = about.StorageQuota.UsageInDrive
+		info.UsageInTrash = about.StorageQuota.UsageInDriveTrash
+
+		info.UsageFormatted = FormatBytes(info.UsageBytes)
+		if info.LimitBytes > 0 {
+			info.LimitFormatted = FormatBytes(info.LimitBytes)
+			info.UsagePercentage = float64(info.UsageBytes) / float64(info.LimitBytes) * 100.0
+			info.IsUnlimited = false
+		} else {
+			info.LimitFormatted = "Безлимит"
+			info.UsagePercentage = 0
+			info.IsUnlimited = true
+		}
+	}
+	return info, nil
+}
+

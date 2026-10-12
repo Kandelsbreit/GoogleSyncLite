@@ -17,6 +17,7 @@ type Config struct {
 	AllowRemoteDeletion bool   `json:"allow_remote_deletion"`
 	MaxDeleteThreshold  int    `json:"max_delete_threshold"`
 	RealtimeWatch       bool   `json:"realtime_watch"`
+	ConcurrentUploads   int    `json:"concurrent_uploads"`
 }
 
 func NormalizeConfig(cfg Config) Config {
@@ -34,6 +35,11 @@ func NormalizeConfig(cfg Config) Config {
 	}
 	if cfg.MaxDeleteThreshold <= 0 {
 		cfg.MaxDeleteThreshold = 20
+	}
+	if cfg.ConcurrentUploads <= 0 {
+		cfg.ConcurrentUploads = 4
+	} else if cfg.ConcurrentUploads > 16 {
+		cfg.ConcurrentUploads = 16
 	}
 	cfg.SafetyShield = true
 	return cfg
@@ -63,6 +69,7 @@ func LoadConfig() Config {
 		AllowRemoteDeletion: false,
 		MaxDeleteThreshold:  20,
 		RealtimeWatch:       true,
+		ConcurrentUploads:   4,
 	}
 
 	data, err := os.ReadFile(cfgPath)
@@ -75,6 +82,9 @@ func LoadConfig() Config {
 		}
 		if _, hasWatch := rawMap["realtime_watch"]; !hasWatch {
 			appConfig.RealtimeWatch = true
+		}
+		if _, hasConc := rawMap["concurrent_uploads"]; !hasConc {
+			appConfig.ConcurrentUploads = 4
 		}
 		appConfig = NormalizeConfig(appConfig)
 	} else {

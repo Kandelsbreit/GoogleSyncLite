@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/api/drive/v3"
@@ -35,6 +37,36 @@ type SyncSummary struct {
 	ConflictCount int
 }
 
+type SyncProgress struct {
+	Phase          string  `json:"phase"`           // "idle", "scanning", "transferring", "done", "error"
+	TotalFiles     int     `json:"total_files"`     // total count of files to upload/download
+	ProcessedFiles int     `json:"processed_files"` // files processed so far
+	CurrentFile    string  `json:"current_file"`    // name/path of active file being synced
+	TotalBytes     int64   `json:"total_bytes"`     // total bytes to upload
+	ProcessedBytes int64   `json:"processed_bytes"` // bytes transferred so far
+	SpeedBps       float64 `json:"speed_bps"`       // current speed in bytes per second
+	SpeedFormatted string  `json:"speed_formatted"` // formatted speed string e.g. "12.4 МБ/с"
+	ETASeconds     int     `json:"eta_seconds"`     // estimated seconds left
+	ETAFormatted   string  `json:"eta_formatted"`   // formatted ETA e.g. "01:24"
+	Percent        float64 `json:"percent"`         // progress percentage (0.0 - 100.0)
+	ActiveWorkers  int     `json:"active_workers"`  // count of concurrent threads
+}
+
+func FormatETA(seconds int) string {
+	if seconds <= 0 {
+		return "00:00"
+	}
+	if seconds >= 3600 {
+		h := seconds / 3600
+		m := (seconds % 3600) / 60
+		s := seconds % 60
+		return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+	}
+	m := seconds / 60
+	s := seconds % 60
+	return fmt.Sprintf("%02d:%02d", m, s)
+}
+
 type rootedLocalFS struct {
 	root *os.Root
 }
@@ -44,13 +76,17 @@ func (r rootedLocalFS) Open(name string) (fs.File, error) {
 }
 
 type SyncEngineGo struct {
-	srv         *drive.Service
-	db          *Database
-	localRoot   string
-	remoteRoot  string
-	foldersMap  map[string]string // relPath -> remote folder ID
-	md5Cache    map[string]string // relPath -> cached MD5
-	logCallback func(string)
+	srv              *drive.Service
+	db               *Database
+	localRoot        string
+	remoteRoot       string
+	foldersMap       map[string]string // relPath -> remote folder ID
+	md5Cache         map[string]string // relPath -> cached MD5
+	logCallback      func(string)
+	foldersMu        sync.Mutex
+	md5Mu            sync.RWMutex
+	concurrency      int
+	progressCallback func(SyncProgress)
 }
 
 func NewSyncEngineGo(srv *drive.Service, db *Database, localRoot, remoteRoot string, logCb func(string)) *SyncEngineGo {
@@ -62,7 +98,21 @@ func NewSyncEngineGo(srv *drive.Service, db *Database, localRoot, remoteRoot str
 		foldersMap:  make(map[string]string),
 		md5Cache:    make(map[string]string),
 		logCallback: logCb,
+		concurrency: 4,
 	}
+}
+
+func (s *SyncEngineGo) SetConcurrency(c int) {
+	if c <= 0 {
+		c = 4
+	} else if c > 16 {
+		c = 16
+	}
+	s.concurrency = c
+}
+
+func (s *SyncEngineGo) SetProgressCallback(cb func(SyncProgress)) {
+	s.progressCallback = cb
 }
 
 func (s *SyncEngineGo) log(msg string) {
@@ -361,7 +411,10 @@ func (s *SyncEngineGo) GetOrComputeMD5(ctx context.Context, relPath string, loc 
 	if loc.MD5 != "" {
 		return loc.MD5, nil
 	}
-	if cached, ok := s.md5Cache[relPath]; ok && cached != "" {
+	s.md5Mu.RLock()
+	cached, ok := s.md5Cache[relPath]
+	s.md5Mu.RUnlock()
+	if ok && cached != "" {
 		return cached, nil
 	}
 	localFullPath := filepath.Join(s.localRoot, filepath.FromSlash(relPath))
@@ -369,7 +422,9 @@ func (s *SyncEngineGo) GetOrComputeMD5(ctx context.Context, relPath string, loc 
 	if err != nil {
 		return "", err
 	}
+	s.md5Mu.Lock()
 	s.md5Cache[relPath] = hash
+	s.md5Mu.Unlock()
 	return hash, nil
 }
 
@@ -641,6 +696,9 @@ func (s *SyncEngineGo) EnsureRemoteFolder(ctx context.Context, relDir string) (s
 	parts := strings.Split(relDir, "/")
 	accum := ""
 	parentID := s.remoteRoot
+
+	s.foldersMu.Lock()
+	defer s.foldersMu.Unlock()
 
 	for _, part := range parts {
 		if ctx.Err() != nil {
@@ -1330,164 +1388,303 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 		}
 	}
 
-	// 2. Process locally new or changed files
-	for path, loc := range localChanges.NewOrChanged {
+	// 2. Process locally new or changed files with Concurrent Worker Pool
+	var totalUploadBytes int64
+	for _, loc := range localChanges.NewOrChanged {
+		totalUploadBytes += loc.Size
+	}
+
+	if len(localChanges.NewOrChanged) > 0 {
+		workers := s.concurrency
+		if workers <= 0 {
+			workers = 4
+		}
+		if workers > len(localChanges.NewOrChanged) {
+			workers = len(localChanges.NewOrChanged)
+		}
+
+		type uploadTask struct {
+			path string
+			loc  FileState
+		}
+
+		taskChan := make(chan uploadTask, len(localChanges.NewOrChanged))
+		for p, l := range localChanges.NewOrChanged {
+			taskChan <- uploadTask{path: p, loc: l}
+		}
+		close(taskChan)
+
+		var (
+			uploadWg                sync.WaitGroup
+			processedCount          int64
+			processedBytes          int64
+			uploadedOkCount         int64
+			tokenAuthErr            error
+			tokenErrOnce            sync.Once
+			workerCtx, cancelWorker = context.WithCancel(ctx)
+			syncStartTime           = time.Now()
+			progressMu              sync.Mutex
+			lastProgressReport      time.Time
+			anyOpFailed             int32
+		)
+		defer cancelWorker()
+
+		reportProgress := func(currentFile string, force bool) {
+			if s.progressCallback == nil {
+				return
+			}
+			progressMu.Lock()
+			defer progressMu.Unlock()
+
+			now := time.Now()
+			if !force && now.Sub(lastProgressReport) < 200*time.Millisecond {
+				return
+			}
+			lastProgressReport = now
+
+			pCount := int(atomic.LoadInt64(&processedCount))
+			pBytes := atomic.LoadInt64(&processedBytes)
+			elapsed := now.Sub(syncStartTime).Seconds()
+
+			speedBps := 0.0
+			if elapsed > 0.5 && pBytes > 0 {
+				speedBps = float64(pBytes) / elapsed
+			}
+
+			remBytes := totalUploadBytes - pBytes
+			etaSec := 0
+			if speedBps > 0 && remBytes > 0 {
+				etaSec = int(float64(remBytes) / speedBps)
+			}
+
+			percent := 0.0
+			if totalUploadBytes > 0 {
+				percent = float64(pBytes) / float64(totalUploadBytes) * 100.0
+			} else if len(localChanges.NewOrChanged) > 0 {
+				percent = float64(pCount) / float64(len(localChanges.NewOrChanged)) * 100.0
+			}
+			if percent > 100.0 {
+				percent = 100.0
+			}
+
+			s.progressCallback(SyncProgress{
+				Phase:          "transferring",
+				TotalFiles:     len(localChanges.NewOrChanged),
+				ProcessedFiles: pCount,
+				CurrentFile:    currentFile,
+				TotalBytes:     totalUploadBytes,
+				ProcessedBytes: pBytes,
+				SpeedBps:       speedBps,
+				SpeedFormatted: FormatSpeed(speedBps),
+				ETASeconds:     etaSec,
+				ETAFormatted:   FormatETA(etaSec),
+				Percent:        percent,
+				ActiveWorkers:  workers,
+			})
+		}
+
+		reportProgress("", true)
+
+		for w := 0; w < workers; w++ {
+			uploadWg.Add(1)
+			go func() {
+				defer uploadWg.Done()
+				for task := range taskChan {
+					if workerCtx.Err() != nil {
+						return
+					}
+
+					path := task.path
+					loc := task.loc
+					localFullPath := s.localPathForRemote(path)
+					st, inDB := stored[path]
+					uploadOk := false
+
+					reportProgress(pathPkg.Base(path), false)
+
+					if inDB && st.FileID != "" {
+						s.log(fmt.Sprintf("[↑] Загрузка обновлений: %s", path))
+						if !dryRun {
+							res, err := s.UpdateFile(workerCtx, st.FileID, localFullPath)
+							if err != nil {
+								if isAuthOrTokenError(err) {
+									tokenErrOnce.Do(func() {
+										tokenAuthErr = err
+										cancelWorker()
+									})
+									return
+								}
+								// Self-healing: if file in cloud was deleted/missing (404), clear stale FileID and upload fresh
+								if gErr, ok := err.(*googleapi.Error); ok && gErr.Code == 404 {
+									s.log(fmt.Sprintf("[*] Файл %s отсутствует в облаке (404 Not Found). Сброс ID и повторная загрузка...", path))
+									_ = s.db.RemoveFile(path)
+									parentID, pErr := s.EnsureRemoteFolder(workerCtx, pathPkg.Dir(path))
+									if pErr == nil {
+										fileName := pathPkg.Base(path)
+										newRes, upErr := s.UploadFile(workerCtx, localFullPath, parentID, fileName)
+										if upErr == nil {
+											locMD5, _ := s.GetOrComputeMD5(workerCtx, path, loc)
+											_ = s.db.UpsertFile(FileState{
+												RelPath: path,
+												FileID:  newRes.Id,
+												MD5:     locMD5,
+												MTime:   loc.MTime,
+												Size:    loc.Size,
+											})
+											uploadOk = true
+										} else {
+											atomic.StoreInt32(&anyOpFailed, 1)
+											s.log(fmt.Sprintf("[!] Ошибка повторной загрузки %s: %v", path, upErr))
+										}
+									} else {
+										atomic.StoreInt32(&anyOpFailed, 1)
+									}
+								} else {
+									atomic.StoreInt32(&anyOpFailed, 1)
+									s.log(fmt.Sprintf("[!] Ошибка обновления файла %s в Google Drive: %v", path, err))
+								}
+							} else {
+								locMD5, _ := s.GetOrComputeMD5(workerCtx, path, loc)
+								if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
+									s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с облачным!", path))
+								} else {
+									_ = s.db.UpsertFile(FileState{
+										RelPath: path,
+										FileID:  st.FileID,
+										MD5:     res.Md5Checksum,
+										MTime:   loc.MTime,
+										Size:    loc.Size,
+									})
+									uploadOk = true
+								}
+							}
+						} else {
+							uploadOk = true
+						}
+					} else {
+						s.log(fmt.Sprintf("[↑] Загрузка нового файла: %s", path))
+						if !dryRun {
+							parentID, err := s.EnsureRemoteFolder(workerCtx, pathPkg.Dir(path))
+							if err != nil {
+								if isAuthOrTokenError(err) {
+									tokenErrOnce.Do(func() {
+										tokenAuthErr = err
+										cancelWorker()
+									})
+									return
+								}
+								atomic.StoreInt32(&anyOpFailed, 1)
+								s.log(fmt.Sprintf("[!] Ошибка создания папки для %s: %v", path, err))
+							} else {
+								fileName := pathPkg.Base(path)
+								escapedFile := strings.ReplaceAll(fileName, "\\", "\\\\")
+								escapedFile = strings.ReplaceAll(escapedFile, "'", "\\'")
+								qFile := fmt.Sprintf("'%s' in parents and name = '%s' and trashed = false", parentID, escapedFile)
+								listRes, errList := s.srv.Files.List().Q(qFile).Spaces("drive").Fields("files(id, md5Checksum)").PageSize(1).Context(workerCtx).Do()
+								if errList != nil && isAuthOrTokenError(errList) {
+									tokenErrOnce.Do(func() {
+										tokenAuthErr = errList
+										cancelWorker()
+									})
+									return
+								}
+								if errList == nil && len(listRes.Files) > 0 {
+									existID := listRes.Files[0].Id
+									locMD5, _ := s.GetOrComputeMD5(workerCtx, path, loc)
+									if listRes.Files[0].Md5Checksum == locMD5 && locMD5 != "" {
+										_ = s.db.UpsertFile(FileState{
+											RelPath: path,
+											FileID:  existID,
+											MD5:     locMD5,
+											MTime:   loc.MTime,
+											Size:    loc.Size,
+										})
+										uploadOk = true
+									} else {
+										res, err := s.UpdateFile(workerCtx, existID, localFullPath)
+										if err != nil {
+											if isAuthOrTokenError(err) {
+												tokenErrOnce.Do(func() {
+													tokenAuthErr = err
+													cancelWorker()
+												})
+												return
+											}
+											atomic.StoreInt32(&anyOpFailed, 1)
+											s.log(fmt.Sprintf("[!] Ошибка обновления существующего файла %s в Google Drive: %v", path, err))
+										} else {
+											if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
+												s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с облачным!", path))
+											} else {
+												_ = s.db.UpsertFile(FileState{
+													RelPath: path,
+													FileID:  existID,
+													MD5:     res.Md5Checksum,
+													MTime:   loc.MTime,
+													Size:    loc.Size,
+												})
+												uploadOk = true
+											}
+										}
+									}
+								} else {
+									res, err := s.UploadFile(workerCtx, localFullPath, parentID, fileName)
+									if err != nil {
+										if isAuthOrTokenError(err) {
+											tokenErrOnce.Do(func() {
+												tokenAuthErr = err
+												cancelWorker()
+											})
+											return
+										}
+										atomic.StoreInt32(&anyOpFailed, 1)
+										s.log(fmt.Sprintf("[!] Ошибка загрузки нового файла %s в Google Drive: %v", path, err))
+									} else {
+										locMD5, _ := s.GetOrComputeMD5(workerCtx, path, loc)
+										if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
+											s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с локальным! Удаляем поврежденную копию...", path))
+											_, _ = s.srv.Files.Update(res.Id, &drive.File{Trashed: true}).Context(workerCtx).Do()
+										} else {
+											_ = s.db.UpsertFile(FileState{
+												RelPath: path,
+												FileID:  res.Id,
+												MD5:     locMD5,
+												MTime:   loc.MTime,
+												Size:    loc.Size,
+											})
+											uploadOk = true
+										}
+									}
+								}
+							}
+						} else {
+							uploadOk = true
+						}
+					}
+
+					atomic.AddInt64(&processedCount, 1)
+					atomic.AddInt64(&processedBytes, loc.Size)
+					if uploadOk {
+						atomic.AddInt64(&uploadedOkCount, 1)
+					}
+					reportProgress(pathPkg.Base(path), false)
+				}
+			}()
+		}
+
+		uploadWg.Wait()
+
+		if tokenAuthErr != nil {
+			return summary, fmt.Errorf("авторизация Google недействительна (токен отозван или истек). Нажмите «Вход Google Drive» в окне приложения")
+		}
 		if ctx.Err() != nil {
 			return summary, ctx.Err()
 		}
-		localFullPath := s.localPathForRemote(path)
-		st, inDB := stored[path]
-
-		if inDB && st.FileID != "" {
-			// File exists in DB -> update it on Google Drive
-			s.log(fmt.Sprintf("[↑] Загрузка обновлений: %s", path))
-			uploadOk := false
-			if !dryRun {
-				res, err := s.UpdateFile(ctx, st.FileID, localFullPath)
-				if err != nil {
-					if isAuthOrTokenError(err) {
-						return summary, fmt.Errorf("авторизация Google недействительна (токен отозван или истек). Нажмите «Вход Google Drive» в окне приложения")
-					}
-					// Self-healing: if file in cloud was deleted/missing (404), clear stale FileID and upload fresh
-					if gErr, ok := err.(*googleapi.Error); ok && gErr.Code == 404 {
-						s.log(fmt.Sprintf("[*] Файл %s отсутствует в облаке (404 Not Found). Сброс ID и повторная загрузка...", path))
-						_ = s.db.RemoveFile(path)
-						parentID, pErr := s.EnsureRemoteFolder(ctx, pathPkg.Dir(path))
-						if pErr == nil {
-							fileName := pathPkg.Base(path)
-							newRes, upErr := s.UploadFile(ctx, localFullPath, parentID, fileName)
-							if upErr == nil {
-								locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
-								_ = s.db.UpsertFile(FileState{
-									RelPath: path,
-									FileID:  newRes.Id,
-									MD5:     locMD5,
-									MTime:   loc.MTime,
-									Size:    loc.Size,
-								})
-								uploadOk = true
-							} else {
-								operationFailed = true
-								s.log(fmt.Sprintf("[!] Ошибка повторной загрузки %s: %v", path, upErr))
-							}
-						}
-					} else {
-						operationFailed = true
-						s.log(fmt.Sprintf("[!] Ошибка обновления файла %s в Google Drive: %v", path, err))
-					}
-				} else {
-					locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
-					if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
-						s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с облачным!", path))
-						continue
-					}
-					_ = s.db.UpsertFile(FileState{
-						RelPath: path,
-						FileID:  st.FileID,
-						MD5:     res.Md5Checksum,
-						MTime:   loc.MTime,
-						Size:    loc.Size,
-					})
-					uploadOk = true
-				}
-			} else {
-				uploadOk = true
-			}
-			if uploadOk {
-				summary.UploadedCount++
-			}
-		} else {
-			// New file
-			s.log(fmt.Sprintf("[↑] Загрузка нового файла: %s", path))
-			uploadOk := false
-			if !dryRun {
-				parentID, err := s.EnsureRemoteFolder(ctx, pathPkg.Dir(path))
-				if err != nil {
-					if isAuthOrTokenError(err) {
-						return summary, fmt.Errorf("авторизация Google недействительна (токен отозван или истек). Нажмите «Вход Google Drive» в окне приложения")
-					}
-					operationFailed = true
-					s.log(fmt.Sprintf("[!] Ошибка создания папки для %s: %v", path, err))
-				} else {
-					fileName := pathPkg.Base(path)
-					// Check if file already exists in cloud under parentID (to avoid duplicate files)
-					escapedFile := strings.ReplaceAll(fileName, "\\", "\\\\")
-					escapedFile = strings.ReplaceAll(escapedFile, "'", "\\'")
-					qFile := fmt.Sprintf("'%s' in parents and name = '%s' and trashed = false", parentID, escapedFile)
-					listRes, errList := s.srv.Files.List().Q(qFile).Spaces("drive").Fields("files(id, md5Checksum)").PageSize(1).Context(ctx).Do()
-					if errList != nil && isAuthOrTokenError(errList) {
-						return summary, fmt.Errorf("авторизация Google недействительна (токен отозван или истек). Нажмите «Вход Google Drive» в окне приложения")
-					}
-					if errList == nil && len(listRes.Files) > 0 {
-						// Existing file in cloud -> update or register it!
-						existID := listRes.Files[0].Id
-						locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
-						if listRes.Files[0].Md5Checksum == locMD5 && locMD5 != "" {
-							_ = s.db.UpsertFile(FileState{
-								RelPath: path,
-								FileID:  existID,
-								MD5:     locMD5,
-								MTime:   loc.MTime,
-								Size:    loc.Size,
-							})
-							uploadOk = true
-						} else {
-							res, err := s.UpdateFile(ctx, existID, localFullPath)
-							if err != nil {
-								if isAuthOrTokenError(err) {
-									return summary, fmt.Errorf("авторизация Google недействительна (токен отозван или истек). Нажмите «Вход Google Drive» в окне приложения")
-								}
-								operationFailed = true
-								s.log(fmt.Sprintf("[!] Ошибка обновления существующего файла %s в Google Drive: %v", path, err))
-							} else {
-								if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
-									s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с облачным!", path))
-									continue
-								}
-								_ = s.db.UpsertFile(FileState{
-									RelPath: path,
-									FileID:  existID,
-									MD5:     res.Md5Checksum,
-									MTime:   loc.MTime,
-									Size:    loc.Size,
-								})
-								uploadOk = true
-							}
-						}
-					} else {
-						// New upload
-						res, err := s.UploadFile(ctx, localFullPath, parentID, fileName)
-						if err != nil {
-							if isAuthOrTokenError(err) {
-								return summary, fmt.Errorf("авторизация Google недействительна (токен отозван или истек). Нажмите «Вход Google Drive» в окне приложения")
-							}
-							operationFailed = true
-							s.log(fmt.Sprintf("[!] Ошибка загрузки нового файла %s в Google Drive: %v", path, err))
-						} else {
-							locMD5, _ := s.GetOrComputeMD5(ctx, path, loc)
-							if res.Md5Checksum != "" && locMD5 != "" && res.Md5Checksum != locMD5 {
-								s.log(fmt.Sprintf("[!] Ошибка целостности: MD5 файла %s не совпал с локальным! Удаляем поврежденную копию...", path))
-								_, _ = s.srv.Files.Update(res.Id, &drive.File{Trashed: true}).Context(ctx).Do()
-								continue
-							}
-							_ = s.db.UpsertFile(FileState{
-								RelPath: path,
-								FileID:  res.Id,
-								MD5:     locMD5,
-								MTime:   loc.MTime,
-								Size:    loc.Size,
-							})
-							uploadOk = true
-						}
-					}
-				}
-			} else {
-				uploadOk = true
-			}
-			if uploadOk {
-				summary.UploadedCount++
-			}
+		if atomic.LoadInt32(&anyOpFailed) > 0 {
+			operationFailed = true
 		}
+		summary.UploadedCount += int(atomic.LoadInt64(&uploadedOkCount))
+		reportProgress("", true)
 	}
 
 	// 3. Process remote delta (files changed in cloud) if in two_way mode
@@ -1558,6 +1755,16 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 	}
 	if err := s.db.SetMeta("last_sync_rfc3339", startTime); err != nil {
 		return summary, err
+	}
+	if s.progressCallback != nil {
+		s.progressCallback(SyncProgress{
+			Phase:          "done",
+			TotalFiles:     summary.UploadedCount + summary.DownloadCount,
+			ProcessedFiles: summary.UploadedCount + summary.DownloadCount,
+			Percent:        100.0,
+			SpeedFormatted: "0 Б/с",
+			ETAFormatted:   "00:00",
+		})
 	}
 	return summary, nil
 }

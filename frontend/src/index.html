@@ -21,7 +21,7 @@
         </div>
         <span>Google Sync Lite</span>
       </div>
-      <span class="version-tag">v1.3.0</span>
+      <span class="version-tag">v1.4.0</span>
       <div class="safety-pill">
         <span class="safety-dot"></span>
         <span>ЩИТ БЕЗОПАСНОСТИ: АКТИВЕН</span>
@@ -104,6 +104,54 @@
             </div>
           </div>
           <div class="status-right" id="statusTimeText">Посл. синхронизация: —</div>
+        </div>
+
+        <!-- Live Transfer Progress Card -->
+        <div class="card transfer-progress-card" id="transferProgressCard" style="display: none;">
+          <div class="card-title">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <div class="spinner-small"></div>
+              <span id="transferTitle">Передача файлов</span>
+            </div>
+            <div class="transfer-stats-header">
+              <span class="speed-badge" id="transferSpeed">0 Б/с</span>
+              <span class="eta-badge" id="transferETA">Осталось: --:--</span>
+            </div>
+          </div>
+          <div class="progress-bar-wrapper">
+            <div class="progress-bar-fill" id="transferBarFill" style="width: 0%;"></div>
+          </div>
+          <div class="transfer-meta-row">
+            <span class="transfer-active-file" id="transferActiveFile">Подготовка к синхронизации...</span>
+            <span class="transfer-counts" id="transferCounts">0 / 0 файлов (0%)</span>
+          </div>
+          <div class="transfer-workers-badge">
+            <span id="transferWorkersBadge">⚡ Потоков: 4</span>
+            <span id="transferBytesInfo">0 МБ / 0 МБ</span>
+          </div>
+        </div>
+
+        <!-- Storage Quota Card -->
+        <div class="card storage-card" id="storageQuotaCard">
+          <div class="card-title">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent-blue)" stroke-width="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+              </svg>
+              <span>Хранилище Google Drive</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="quota-user" id="quotaUserEmail">Загрузка...</span>
+              <button class="btn-icon-subtle" onclick="loadStorageQuota()" title="Обновить квоту">🔄</button>
+            </div>
+          </div>
+          <div class="quota-bar-wrapper">
+            <div class="quota-bar" id="quotaBar" style="width: 0%;"></div>
+          </div>
+          <div class="quota-stats">
+            <span id="quotaUsageText">Проверка квоты...</span>
+            <span id="quotaPercentText">0%</span>
+          </div>
         </div>
 
         <!-- Action Cards Grid -->
@@ -259,6 +307,24 @@
           <div class="form-group" style="margin-top: 14px;">
             <label class="form-label">Интервал проверки изменений (минуты)</label>
             <input type="number" id="cfgInterval" min="1" max="1440" style="max-width: 130px;">
+          </div>
+        </div>
+
+        <!-- Performance & Concurrency Card -->
+        <div class="card">
+          <div class="card-title">Производительность и параллельная загрузка</div>
+          <div class="form-group">
+            <label class="form-label">Количество параллельных потоков (Worker Pool):</label>
+            <select id="cfgConcurrentUploads" class="form-select" style="max-width: 280px;">
+              <option value="1">1 поток (последовательно)</option>
+              <option value="2">2 потока</option>
+              <option value="4" selected>4 потока (рекомендуется)</option>
+              <option value="8">8 потоков (быстрый интернет)</option>
+              <option value="16">16 потоков (максимальная скорость)</option>
+            </select>
+            <span style="font-size: 11px; color: var(--text-muted); margin-top: 5px; display: block;">
+              Параллельная отправка ускоряет передачу сотен и тысяч файлов в 3-6 раз.
+            </span>
           </div>
         </div>
 

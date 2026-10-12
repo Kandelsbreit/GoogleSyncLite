@@ -86,6 +86,113 @@ function copyLogs() {
   }
 }
 
+// Storage Quota Engine
+let lastQuotaFetchTime = 0;
+
+async function loadStorageQuota() {
+  if (!window.go || !window.go.main || !window.go.main.App) return;
+
+  const userText = document.getElementById('quotaUserEmail');
+  const usageText = document.getElementById('quotaUsageText');
+  const percentText = document.getElementById('quotaPercentText');
+  const bar = document.getElementById('quotaBar');
+
+  try {
+    const info = await window.go.main.App.GetAccountStorageInfo();
+    if (!info) return;
+
+    lastQuotaFetchTime = Date.now();
+
+    if (userText) {
+      userText.textContent = info.user_name ? `${info.user_name} (${info.user_email})` : (info.user_email || 'Google Drive');
+    }
+
+    if (usageText) {
+      if (info.is_unlimited) {
+        usageText.textContent = `${info.usage_formatted} использовано (Безлимитный аккаунт)`;
+      } else {
+        usageText.textContent = `${info.usage_formatted} из ${info.limit_formatted} использовано`;
+      }
+    }
+
+    if (percentText) {
+      percentText.textContent = info.is_unlimited ? '' : `${info.usage_percentage.toFixed(1)}%`;
+    }
+
+    if (bar) {
+      const pct = Math.min(100, Math.max(0, info.usage_percentage));
+      bar.style.width = pct + '%';
+      bar.classList.remove('warning', 'danger');
+      if (pct > 90) {
+        bar.classList.add('danger');
+      } else if (pct > 75) {
+        bar.classList.add('warning');
+      }
+    }
+  } catch (err) {
+    if (usageText) usageText.textContent = 'Требуется авторизация в Google Drive';
+    if (userText) userText.textContent = 'Не авторизован';
+  }
+}
+
+// Live Progress Engine
+function formatBytesJs(b) {
+  if (!b || b <= 0) return '0 Б';
+  const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
+  const i = Math.floor(Math.log(b) / Math.log(1024));
+  return (b / Math.pow(1024, i)).toFixed(1) + ' ' + (units[i] || 'Б');
+}
+
+function handleSyncProgress(p) {
+  const card = document.getElementById('transferProgressCard');
+  if (!card) return;
+
+  if (!p || p.phase === 'done' || p.phase === 'idle') {
+    card.style.display = 'none';
+    return;
+  }
+
+  card.style.display = 'block';
+
+  const fill = document.getElementById('transferBarFill');
+  if (fill) fill.style.width = Math.min(100, Math.max(0, p.percent || 0)) + '%';
+
+  const title = document.getElementById('transferTitle');
+  if (title) {
+    title.textContent = p.phase === 'scanning' ? 'Дельта-сканирование файлов...' : 'Параллельная передача файлов';
+  }
+
+  const speed = document.getElementById('transferSpeed');
+  if (speed) speed.textContent = p.speed_formatted || '0 Б/с';
+
+  const eta = document.getElementById('transferETA');
+  if (eta) eta.textContent = 'Осталось: ' + (p.eta_formatted || '--:--');
+
+  const activeFile = document.getElementById('transferActiveFile');
+  if (activeFile) {
+    activeFile.textContent = p.current_file ? 'Файл: ' + p.current_file : 'Синхронизация каталогов...';
+  }
+
+  const counts = document.getElementById('transferCounts');
+  if (counts) {
+    counts.textContent = `${p.processed_files} / ${p.total_files} файлов (${(p.percent || 0).toFixed(1)}%)`;
+  }
+
+  const workers = document.getElementById('transferWorkersBadge');
+  if (workers) {
+    workers.textContent = `⚡ Потоков: ${p.active_workers || 4}`;
+  }
+
+  const bytesInfo = document.getElementById('transferBytesInfo');
+  if (bytesInfo) {
+    if (p.total_bytes > 0) {
+      bytesInfo.textContent = `${formatBytesJs(p.processed_bytes)} / ${formatBytesJs(p.total_bytes)}`;
+    } else {
+      bytesInfo.textContent = '';
+    }
+  }
+}
+
 // Status & Data Sync
 async function loadStatus() {
   if (!window.go || !window.go.main || !window.go.main.App) return;
@@ -100,6 +207,9 @@ async function loadStatus() {
     if (data.authenticated) {
       authDot.classList.add('connected');
       authText.textContent = 'Google Drive подключен';
+      if (Date.now() - lastQuotaFetchTime > 60000) {
+        loadStorageQuota();
+      }
     } else {
       authDot.classList.remove('connected');
       authText.textContent = 'Требуется вход Google';
@@ -133,6 +243,11 @@ async function loadStatus() {
       }
 
       setValIfNotFocused('cfgInterval', Math.max(1, Math.floor((cfg.sync_interval_seconds || 60) / 60)));
+
+      const elConc = document.getElementById('cfgConcurrentUploads');
+      if (elConc && elConc !== activeEl) {
+        elConc.value = String(cfg.concurrent_uploads || 4);
+      }
 
       const elDel = document.getElementById('cfgAllowRemoteDeletion');
       if (elDel && elDel !== activeEl) {
@@ -175,6 +290,8 @@ async function loadStatus() {
       if (data.last_sync_time) {
         sTime.textContent = 'Посл. синхронизация: ' + data.last_sync_time;
       }
+      const progressCard = document.getElementById('transferProgressCard');
+      if (progressCard) progressCard.style.display = 'none';
     }
   } catch (err) {
     console.error('Failed to load status:', err);
@@ -367,6 +484,7 @@ async function toggleAutostart(enabled) {
 async function saveSettings() {
   const intervalMin = parseInt(document.getElementById('cfgInterval').value) || 1;
   const maxDel = parseInt(document.getElementById('cfgMaxDeleteThreshold').value) || 20;
+  const concUploads = parseInt(document.getElementById('cfgConcurrentUploads').value) || 4;
 
   const cfg = {
     local_folder: document.getElementById('cfgLocalFolder').value.trim(),
@@ -374,6 +492,7 @@ async function saveSettings() {
     sync_interval_seconds: intervalMin * 60,
     autostart: document.getElementById('cfgAutostart').checked,
     realtime_watch: document.getElementById('cfgRealtimeWatch').checked,
+    concurrent_uploads: concUploads,
     sync_mode: currentSyncMode,
     safety_shield: true,
     allow_remote_deletion: document.getElementById('cfgAllowRemoteDeletion').checked,
@@ -400,8 +519,14 @@ window.addEventListener('DOMContentLoaded', () => {
     window.runtime.EventsOn('status-updated', () => {
       loadStatus();
     });
+
+    window.runtime.EventsOn('sync-progress', (p) => {
+      handleSyncProgress(p);
+    });
   }
 
   loadStatus();
+  loadStorageQuota();
   setInterval(loadStatus, 2500);
+  setInterval(loadStorageQuota, 60000);
 });

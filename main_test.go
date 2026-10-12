@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -348,4 +349,94 @@ func TestScanLocalDeltaOptimized(t *testing.T) {
 		t.Fatalf("expected 2 new files, got %d", len(changes.NewOrChanged))
 	}
 }
+
+func TestFormatBytesAndSpeed(t *testing.T) {
+	if s := FormatBytes(0); s != "0 Б" {
+		t.Fatalf("expected '0 Б', got '%s'", s)
+	}
+	if s := FormatBytes(1024); s != "1.0 КБ" {
+		t.Fatalf("expected '1.0 КБ', got '%s'", s)
+	}
+	if s := FormatBytes(1048576 * 15); s != "15.0 МБ" {
+		t.Fatalf("expected '15.0 МБ', got '%s'", s)
+	}
+	if s := FormatBytes(1073741824 * 5); s != "5.0 ГБ" {
+		t.Fatalf("expected '5.0 ГБ', got '%s'", s)
+	}
+
+	if s := FormatSpeed(0); s != "0 Б/с" {
+		t.Fatalf("expected '0 Б/с', got '%s'", s)
+	}
+	if s := FormatSpeed(1048576 * 2.5); s != "2.5 МБ/с" {
+		t.Fatalf("expected '2.5 МБ/с', got '%s'", s)
+	}
+}
+
+func TestFormatETA(t *testing.T) {
+	if s := FormatETA(0); s != "00:00" {
+		t.Fatalf("expected '00:00', got '%s'", s)
+	}
+	if s := FormatETA(65); s != "01:05" {
+		t.Fatalf("expected '01:05', got '%s'", s)
+	}
+	if s := FormatETA(3665); s != "01:01:05" {
+		t.Fatalf("expected '01:01:05', got '%s'", s)
+	}
+}
+
+func TestConfigConcurrencyNormalization(t *testing.T) {
+	cfg := NormalizeConfig(Config{
+		ConcurrentUploads: 0,
+	})
+	if cfg.ConcurrentUploads != 4 {
+		t.Fatalf("expected default 4, got %d", cfg.ConcurrentUploads)
+	}
+
+	cfgMax := NormalizeConfig(Config{
+		ConcurrentUploads: 99,
+	})
+	if cfgMax.ConcurrentUploads != 16 {
+		t.Fatalf("expected capped 16, got %d", cfgMax.ConcurrentUploads)
+	}
+
+	cfgCustom := NormalizeConfig(Config{
+		ConcurrentUploads: 8,
+	})
+	if cfgCustom.ConcurrentUploads != 8 {
+		t.Fatalf("expected 8, got %d", cfgCustom.ConcurrentUploads)
+	}
+}
+
+func TestGetOrComputeMD5ThreadSafety(t *testing.T) {
+	tmpDir := t.TempDir()
+	sample := filepath.Join(tmpDir, "parallel.txt")
+	_ = os.WriteFile(sample, []byte("parallel md5 test content"), 0644)
+
+	dbDir := t.TempDir()
+	db, err := OpenDatabase(filepath.Join(dbDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	engine := NewSyncEngineGo(nil, db, tmpDir, "root", nil)
+	engine.SetConcurrency(8)
+
+	ctx := context.Background()
+	loc := FileState{RelPath: "parallel.txt"}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h, err := engine.GetOrComputeMD5(ctx, "parallel.txt", loc)
+			if err != nil || h == "" {
+				t.Errorf("error computing md5: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 
