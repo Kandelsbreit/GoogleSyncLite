@@ -21,7 +21,7 @@
         </div>
         <span>Google Sync Lite</span>
       </div>
-      <span class="version-tag">v1.6.0</span>
+      <span class="version-tag">v1.7.0</span>
       <div class="safety-pill">
         <span class="safety-dot"></span>
         <span>ЩИТ БЕЗОПАСНОСТИ: АКТИВЕН</span>
@@ -288,8 +288,24 @@
             <input type="radio" name="cfgSyncMode" id="cfgRadioTwoWay" value="two_way">
             <div class="mode-details">
               <span class="mode-title-text">Двусторонняя синхронизация (Two-Way)</span>
-              <span class="mode-desc-text">Изменения идут в обе стороны. Конфликтующие изменения не затираются автоматически — приложение остановит цикл и покажет файл.</span>
+              <span class="mode-desc-text">Изменения идут в обе стороны. Конфликтующие изменения разрешаются автоматически без потери данных.</span>
             </div>
+          </div>
+        </div>
+
+        <!-- Conflict Resolution Card -->
+        <div class="card">
+          <div class="card-title">Разрешение конфликтов (Two-Way)</div>
+          <div class="form-group">
+            <label class="form-label">Действие при одновременном изменении файла на ПК и в облаке:</label>
+            <select id="cfgConflictStrategy" class="form-select" style="max-width: 400px;">
+              <option value="keep_both" selected>🛡️ Сохранять обе версии (создать копию конфликта)</option>
+              <option value="local_wins">💻 Локальная версия главная (перезаписать в Google Drive)</option>
+              <option value="remote_wins">☁️ Версия из облака главная (сохранить ПК в .bak)</option>
+            </select>
+            <span style="font-size: 11px; color: var(--text-muted); margin-top: 5px; display: block;">
+              При выборе «Сохранять обе версии» (режим Google Drive / Dropbox) локальный файл сохраняется с суффиксом «(Конфликт дата_время)», а из облака скачивается копия — ни одного байта данных не теряется.
+            </span>
           </div>
         </div>
 
@@ -345,6 +361,24 @@
               <input type="checkbox" id="cfgNotificationsEnabled" checked>
               <span class="slider"></span>
             </label>
+          </div>
+
+          <div class="switch-row" style="margin-top: 14px;">
+            <div class="switch-label-wrap">
+              <span class="switch-title">🌙 Тихие часы (ночной режим)</span>
+              <span class="switch-desc">Приостанавливать фоновую синхронизацию в указанный промежуток времени, чтобы не нагружать ПК и сеть.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="cfgQuietHoursEnabled" onchange="toggleQuietHoursUI(this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="input-row" id="quietHoursTimeRow" style="margin-top: 10px; align-items: center; gap: 8px; display: none;">
+            <span style="font-size: 12px; color: var(--text-muted);">С:</span>
+            <input type="time" id="cfgQuietHoursStart" value="23:00" style="max-width: 100px;">
+            <span style="font-size: 12px; color: var(--text-muted);">По:</span>
+            <input type="time" id="cfgQuietHoursEnd" value="07:00" style="max-width: 100px;">
           </div>
 
           <div class="form-group" style="margin-top: 14px;">

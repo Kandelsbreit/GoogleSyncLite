@@ -10,6 +10,8 @@ export function GetAccountStorageInfo():Promise<main.StorageQuotaInfo>;
 
 export function GetDriveFolders():Promise<Array<main.FolderItem>>;
 
+export function GetFileDriveURL(arg1:string):Promise<string>;
+
 export function GetRecentFiles():Promise<Array<main.RecentFileItem>>;
 
 export function GetStatus():Promise<Record<string, any>>;
@@ -19,6 +21,10 @@ export function HideToTray():Promise<void>;
 export function IsPaused():Promise<boolean>;
 
 export function MinimizeWindow():Promise<void>;
+
+export function OpenInGoogleDrive(arg1:string):Promise<void>;
+
+export function OpenLocalFile(arg1:string):Promise<void>;
 
 export function OpenLocalFolder():Promise<void>;
 

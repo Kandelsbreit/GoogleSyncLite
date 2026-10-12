@@ -18,6 +18,10 @@ export function GetDriveFolders() {
   return window['go']['main']['App']['GetDriveFolders']();
 }
 
+export function GetFileDriveURL(arg1) {
+  return window['go']['main']['App']['GetFileDriveURL'](arg1);
+}
+
 export function GetRecentFiles() {
   return window['go']['main']['App']['GetRecentFiles']();
 }
@@ -36,6 +40,14 @@ export function IsPaused() {
 
 export function MinimizeWindow() {
   return window['go']['main']['App']['MinimizeWindow']();
+}
+
+export function OpenInGoogleDrive(arg1) {
+  return window['go']['main']['App']['OpenInGoogleDrive'](arg1);
+}
+
+export function OpenLocalFile(arg1) {
+  return window['go']['main']['App']['OpenLocalFile'](arg1);
 }
 
 export function OpenLocalFolder() {

@@ -269,6 +269,20 @@ async function loadStatus() {
         elBw.value = String(cfg.bandwidth_limit_kbps || 0);
       }
 
+      const elConflict = document.getElementById('cfgConflictStrategy');
+      if (elConflict && elConflict !== activeEl) {
+        elConflict.value = cfg.conflict_strategy || 'keep_both';
+      }
+
+      const elQuiet = document.getElementById('cfgQuietHoursEnabled');
+      if (elQuiet && elQuiet !== activeEl) {
+        elQuiet.checked = !!cfg.quiet_hours_enabled;
+        toggleQuietHoursUI(elQuiet.checked);
+      }
+
+      setValIfNotFocused('cfgQuietHoursStart', cfg.quiet_hours_start || '23:00');
+      setValIfNotFocused('cfgQuietHoursEnd', cfg.quiet_hours_end || '07:00');
+
       setValIfNotFocused('cfgMaxDeleteThreshold', cfg.max_delete_threshold || 20);
 
       if (cfg.sync_mode) {
@@ -584,11 +598,82 @@ async function toggleAutostart(enabled) {
   }
 }
 
+function toggleQuietHoursUI(enabled) {
+  const row = document.getElementById('quietHoursTimeRow');
+  if (row) {
+    row.style.display = enabled ? 'flex' : 'none';
+  }
+}
+
+function showToast(message) {
+  const existing = document.querySelector('.toast-notification');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.className = 'toast-notification';
+  toast.innerHTML = `<span>✓</span><span>${escapeHtml(message)}</span>`;
+  document.body.appendChild(toast);
+
+  setTimeout(() => {
+    toast.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(10px)';
+    setTimeout(() => toast.remove(), 300);
+  }, 2500);
+}
+
+async function openLocalFile(relPath) {
+  if (window.go && window.go.main && window.go.main.App && window.go.main.App.OpenLocalFile) {
+    try {
+      await window.go.main.App.OpenLocalFile(relPath);
+    } catch (err) {
+      console.error('Error opening local file:', err);
+    }
+  }
+}
+
+async function openInDrive(relPath) {
+  if (window.go && window.go.main && window.go.main.App && window.go.main.App.OpenInGoogleDrive) {
+    try {
+      await window.go.main.App.OpenInGoogleDrive(relPath);
+    } catch (err) {
+      console.error('Error opening file in Google Drive:', err);
+    }
+  }
+}
+
+function copyDriveUrl(url) {
+  if (!url) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(() => {
+      showToast('Ссылка на Google Диск скопирована!');
+    }).catch(() => fallbackCopy(url));
+  } else {
+    fallbackCopy(url);
+  }
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+  showToast('Ссылка на Google Диск скопирована!');
+}
+
 async function saveSettings() {
   const intervalMin = parseInt(document.getElementById('cfgInterval').value) || 1;
   const maxDel = parseInt(document.getElementById('cfgMaxDeleteThreshold').value) || 20;
   const concUploads = parseInt(document.getElementById('cfgConcurrentUploads').value) || 4;
   const bwLimit = parseInt(document.getElementById('cfgBandwidthLimit') ? document.getElementById('cfgBandwidthLimit').value : 0) || 0;
+  const conflictStrategy = document.getElementById('cfgConflictStrategy') ? document.getElementById('cfgConflictStrategy').value : 'keep_both';
+  const quietHoursEnabled = document.getElementById('cfgQuietHoursEnabled') ? document.getElementById('cfgQuietHoursEnabled').checked : false;
+  const quietHoursStart = document.getElementById('cfgQuietHoursStart') ? document.getElementById('cfgQuietHoursStart').value : '23:00';
+  const quietHoursEnd = document.getElementById('cfgQuietHoursEnd') ? document.getElementById('cfgQuietHoursEnd').value : '07:00';
 
   const rawRules = document.getElementById('cfgCustomIgnoreRules') ? document.getElementById('cfgCustomIgnoreRules').value : '';
   const customIgnoreRules = rawRules.split('\n').map(s => s.trim()).filter(Boolean);
@@ -603,6 +688,10 @@ async function saveSettings() {
     custom_ignore_rules: customIgnoreRules,
     notifications_enabled: document.getElementById('cfgNotificationsEnabled') ? document.getElementById('cfgNotificationsEnabled').checked : true,
     bandwidth_limit_kbps: bwLimit,
+    conflict_strategy: conflictStrategy,
+    quiet_hours_enabled: quietHoursEnabled,
+    quiet_hours_start: quietHoursStart,
+    quiet_hours_end: quietHoursEnd,
     sync_mode: currentSyncMode,
     safety_shield: true,
     allow_remote_deletion: document.getElementById('cfgAllowRemoteDeletion').checked,
@@ -641,19 +730,39 @@ async function loadRecentFiles() {
       } else if (it.action === 'delete') {
         icon = '✕';
         badgeClass = 'delete';
+      } else if (it.action && it.action.includes('conflict')) {
+        icon = '⚡';
+        badgeClass = 'conflict';
       }
 
       const sizeStr = it.action === 'delete' ? '' : (it.size_formatted || '');
+      const safeRel = escapeHtml(it.rel_path);
+      const safeJsRel = it.rel_path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const safeDriveLink = it.drive_link ? it.drive_link.replace(/'/g, "\\'") : '';
+
+      let actionsHtml = `
+        <button class="recent-file-btn" onclick="openLocalFile('${safeJsRel}')" title="Показать в проводнике Windows">📂</button>
+      `;
+
+      if (it.drive_link) {
+        actionsHtml += `
+          <button class="recent-file-btn" onclick="openInDrive('${safeJsRel}')" title="Открыть в Google Диске (в браузере)">↗</button>
+          <button class="recent-file-btn" onclick="copyDriveUrl('${safeDriveLink}')" title="Скопировать ссылку на файл в Google Диске">🔗</button>
+        `;
+      }
 
       html += `
-        <div class="recent-file-item" title="${escapeHtml(it.rel_path)}">
+        <div class="recent-file-item" title="${safeRel}">
           <div class="recent-file-left">
             <span class="recent-file-action-badge ${badgeClass}">${icon}</span>
-            <span class="recent-file-name">${escapeHtml(it.rel_path)}</span>
+            <span class="recent-file-name">${safeRel}</span>
           </div>
           <div class="recent-file-right">
             ${sizeStr ? `<span class="recent-file-size">${escapeHtml(sizeStr)}</span>` : ''}
             <span class="recent-file-time">${escapeHtml(it.time_ago || it.timestamp)}</span>
+            <div class="recent-file-actions">
+              ${actionsHtml}
+            </div>
           </div>
         </div>
       `;

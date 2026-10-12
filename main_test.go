@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestHasherGo(t *testing.T) {
@@ -625,6 +626,117 @@ func TestRecentFilesDatabase(t *testing.T) {
 	}
 	if len(appItems) != 3 {
 		t.Fatalf("expected 3 app items, got %d", len(appItems))
+	}
+}
+
+func TestIsInQuietHours(t *testing.T) {
+	// Daytime range 09:00 - 18:00
+	t1 := time.Date(2026, 10, 12, 12, 30, 0, 0, time.UTC) // inside
+	t2 := time.Date(2026, 10, 12, 8, 30, 0, 0, time.UTC)  // outside
+	t3 := time.Date(2026, 10, 12, 19, 0, 0, 0, time.UTC)  // outside
+
+	if !IsInQuietHours(t1, "09:00", "18:00") {
+		t.Errorf("expected t1 (12:30) to be in quiet hours 09:00-18:00")
+	}
+	if IsInQuietHours(t2, "09:00", "18:00") {
+		t.Errorf("expected t2 (08:30) NOT to be in quiet hours 09:00-18:00")
+	}
+	if IsInQuietHours(t3, "09:00", "18:00") {
+		t.Errorf("expected t3 (19:00) NOT to be in quiet hours 09:00-18:00")
+	}
+
+	// Overnight range 23:00 - 07:00
+	tNight1 := time.Date(2026, 10, 12, 23, 30, 0, 0, time.UTC) // inside
+	tNight2 := time.Date(2026, 10, 12, 3, 15, 0, 0, time.UTC)  // inside
+	tDay := time.Date(2026, 10, 12, 14, 0, 0, 0, time.UTC)     // outside
+
+	if !IsInQuietHours(tNight1, "23:00", "07:00") {
+		t.Errorf("expected tNight1 (23:30) to be in overnight quiet hours 23:00-07:00")
+	}
+	if !IsInQuietHours(tNight2, "23:00", "07:00") {
+		t.Errorf("expected tNight2 (03:15) to be in overnight quiet hours 23:00-07:00")
+	}
+	if IsInQuietHours(tDay, "23:00", "07:00") {
+		t.Errorf("expected tDay (14:00) NOT to be in overnight quiet hours 23:00-07:00")
+	}
+
+	// Invalid input handling
+	if IsInQuietHours(tDay, "invalid", "07:00") {
+		t.Errorf("expected invalid format to return false")
+	}
+}
+
+func TestCopyLocalFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	src := filepath.Join(tmpDir, "orig.txt")
+	dst := filepath.Join(tmpDir, "sub", "copy.txt")
+
+	content := []byte("Conflict Test Data 12345")
+	if err := os.WriteFile(src, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyLocalFile(src, dst); err != nil {
+		t.Fatalf("copyLocalFile failed: %v", err)
+	}
+
+	read, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("failed reading copied file: %v", err)
+	}
+	if string(read) != string(content) {
+		t.Fatalf("expected copied content '%s', got '%s'", content, read)
+	}
+}
+
+func TestRecentFileDriveLinkAndConflictStrategy(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "conflict_test.db")
+	db, err := OpenDatabase(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// 1. Add file to files table
+	err = db.UpsertFile(FileState{
+		RelPath: "project/design.psd",
+		FileID:  "drive_file_id_999",
+		Size:    5000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Add recent file entry
+	_ = db.AddRecentFile("project/design.psd", "upload", 5000)
+
+	// 3. Query recent files and verify DriveLink joined
+	items, err := db.GetRecentFiles(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 recent file, got %d", len(items))
+	}
+	expectedLink := "https://drive.google.com/file/d/drive_file_id_999/view"
+	if items[0].DriveLink != expectedLink {
+		t.Fatalf("expected DriveLink %s, got %s", expectedLink, items[0].DriveLink)
+	}
+
+	// 4. Test SetConflictStrategy on engine
+	engine := &SyncEngineGo{}
+	engine.SetConflictStrategy("local_wins")
+	if engine.conflictStrategy != "local_wins" {
+		t.Errorf("expected local_wins, got %s", engine.conflictStrategy)
+	}
+	engine.SetConflictStrategy("remote_wins")
+	if engine.conflictStrategy != "remote_wins" {
+		t.Errorf("expected remote_wins, got %s", engine.conflictStrategy)
+	}
+	engine.SetConflictStrategy("unknown")
+	if engine.conflictStrategy != "keep_both" {
+		t.Errorf("expected fallback to keep_both, got %s", engine.conflictStrategy)
 	}
 }
 

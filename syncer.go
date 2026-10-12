@@ -89,6 +89,7 @@ type SyncEngineGo struct {
 	progressCallback   func(SyncProgress)
 	ignoreMatcher      *IgnoreMatcher
 	bandwidthLimitKBPS int
+	conflictStrategy   string
 }
 
 // ThrottledReader limits the read rate of data to a maximum KB/s.
@@ -140,6 +141,27 @@ func (tr *ThrottledReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func copyLocalFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
 func NewSyncEngineGo(srv *drive.Service, db *Database, localRoot, remoteRoot string, logCb func(string)) *SyncEngineGo {
 	cfg := GetConfig()
 	return &SyncEngineGo{
@@ -152,6 +174,7 @@ func NewSyncEngineGo(srv *drive.Service, db *Database, localRoot, remoteRoot str
 		logCallback:        logCb,
 		concurrency:        4,
 		bandwidthLimitKBPS: cfg.BandwidthLimitKBPS,
+		conflictStrategy:   cfg.ConflictStrategy,
 		ignoreMatcher:      NewIgnoreMatcher(localRoot, cfg.CustomIgnoreRules),
 	}
 }
@@ -161,6 +184,13 @@ func (s *SyncEngineGo) SetBandwidthLimit(kbps int) {
 		kbps = 0
 	}
 	s.bandwidthLimitKBPS = kbps
+}
+
+func (s *SyncEngineGo) SetConflictStrategy(strategy string) {
+	if strategy != "local_wins" && strategy != "remote_wins" {
+		strategy = "keep_both"
+	}
+	s.conflictStrategy = strategy
 }
 
 func (s *SyncEngineGo) SetConcurrency(c int) {
@@ -1200,15 +1230,68 @@ func (s *SyncEngineGo) Sync(ctx context.Context, dryRun bool, syncMode string) (
 	summary := &SyncSummary{}
 	operationFailed := false
 	if syncMode == "two_way" {
+		strategy := s.conflictStrategy
+		if strategy == "" {
+			strategy = "keep_both"
+		}
 		for path, rem := range remoteFiles {
-			if _, locallyChanged := localChanges.NewOrChanged[path]; !locallyChanged {
+			loc, locallyChanged := localChanges.NewOrChanged[path]
+			if !locallyChanged {
 				continue
 			}
 			summary.ConflictCount++
 			if rem.Trashed {
-				return summary, fmt.Errorf("конфликт: файл '%s' изменён локально, но удалён в Google Drive; изменения не применены", path)
+				if strategy == "remote_wins" {
+					delete(localChanges.NewOrChanged, path)
+					_ = os.Remove(s.localPathForRemote(path))
+					_ = s.db.RemoveFile(path)
+					summary.DeletedCount++
+					s.log(fmt.Sprintf("[⚡] Конфликт '%s': файл удалён в облаке, удаляем локально (remote_wins)", path))
+				} else {
+					delete(remoteFiles, path)
+					s.log(fmt.Sprintf("[⚡] Конфликт '%s': файл изменён локально, но удалён в Google Drive. Локальная версия сохранена.", path))
+					_ = s.db.AddRecentFile(path, "conflict_local", loc.Size)
+				}
+				continue
 			}
-			return summary, fmt.Errorf("конфликт: файл '%s' изменён и локально, и в Google Drive; изменения не применены", path)
+
+			// File changed both locally and in Google Drive
+			switch strategy {
+			case "local_wins":
+				delete(remoteFiles, path)
+				s.log(fmt.Sprintf("[⚡] Конфликт '%s': выбрана локальная версия (local_wins), изменения отправляются в Google Drive", path))
+				_ = s.db.AddRecentFile(path, "conflict_local", loc.Size)
+
+			case "remote_wins":
+				locPath := s.localPathForRemote(path)
+				_ = copyLocalFile(locPath, locPath+".conflict.bak")
+				delete(localChanges.NewOrChanged, path)
+				s.log(fmt.Sprintf("[⚡] Конфликт '%s': выбрана облачная версия (remote_wins), локальная копия сохранена в .conflict.bak", path))
+				_ = s.db.AddRecentFile(path, "conflict_remote", loc.Size)
+
+			default: // "keep_both"
+				ext := pathPkg.Ext(path)
+				base := strings.TrimSuffix(path, ext)
+				timeStr := time.Now().Format("2006-01-02_150405")
+				conflictRelPath := fmt.Sprintf("%s (Конфликт %s)%s", base, timeStr, ext)
+
+				locPath := s.localPathForRemote(path)
+				conflictLocPath := s.localPathForRemote(conflictRelPath)
+
+				if err := copyLocalFile(locPath, conflictLocPath); err == nil {
+					s.log(fmt.Sprintf("[⚡] Конфликт '%s': создана резервная копия '%s'", path, conflictRelPath))
+					delete(localChanges.NewOrChanged, path)
+					localChanges.NewOrChanged[conflictRelPath] = FileState{
+						RelPath: conflictRelPath,
+						Size:    loc.Size,
+						MTime:   float64(time.Now().Unix()),
+					}
+					_ = s.db.AddRecentFile(conflictRelPath, "conflict", loc.Size)
+				} else {
+					s.log(fmt.Sprintf("[!] Ошибка создания копии конфликта для %s: %v. Применяется local_wins.", path, err))
+					delete(remoteFiles, path)
+				}
+			}
 		}
 	}
 

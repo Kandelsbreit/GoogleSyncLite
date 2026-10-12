@@ -15,6 +15,10 @@ export namespace main {
 	    custom_ignore_rules: string[];
 	    notifications_enabled: boolean;
 	    bandwidth_limit_kbps: number;
+	    conflict_strategy: string;
+	    quiet_hours_enabled: boolean;
+	    quiet_hours_start: string;
+	    quiet_hours_end: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -36,6 +40,10 @@ export namespace main {
 	        this.custom_ignore_rules = source["custom_ignore_rules"];
 	        this.notifications_enabled = source["notifications_enabled"];
 	        this.bandwidth_limit_kbps = source["bandwidth_limit_kbps"];
+	        this.conflict_strategy = source["conflict_strategy"];
+	        this.quiet_hours_enabled = source["quiet_hours_enabled"];
+	        this.quiet_hours_start = source["quiet_hours_start"];
+	        this.quiet_hours_end = source["quiet_hours_end"];
 	    }
 	}
 	export class FolderItem {
@@ -60,6 +68,7 @@ export namespace main {
 	    size_formatted: string;
 	    timestamp: string;
 	    time_ago: string;
+	    drive_link: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new RecentFileItem(source);
@@ -74,6 +83,7 @@ export namespace main {
 	        this.size_formatted = source["size_formatted"];
 	        this.timestamp = source["timestamp"];
 	        this.time_ago = source["time_ago"];
+	        this.drive_link = source["drive_link"];
 	    }
 	}
 	export class StorageQuotaInfo {

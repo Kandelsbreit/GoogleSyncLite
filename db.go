@@ -22,11 +22,12 @@ type FileState struct {
 type RecentFileItem struct {
 	ID            int64  `json:"id"`
 	RelPath       string `json:"rel_path"`
-	Action        string `json:"action"` // "upload", "download", "delete"
+	Action        string `json:"action"` // "upload", "download", "delete", "conflict"
 	Size          int64  `json:"size"`
 	SizeFormatted string `json:"size_formatted"`
 	Timestamp     string `json:"timestamp"`
 	TimeAgo       string `json:"time_ago"`
+	DriveLink     string `json:"drive_link"`
 }
 
 type Database struct {
@@ -271,9 +272,10 @@ func (d *Database) GetRecentFiles(limit int) ([]RecentFileItem, error) {
 	}
 
 	rows, err := d.db.Query(`
-		SELECT id, rel_path, action, size, synced_at
-		FROM recent_files
-		ORDER BY synced_at DESC, id DESC
+		SELECT r.id, r.rel_path, r.action, r.size, r.synced_at, COALESCE(f.file_id, '')
+		FROM recent_files r
+		LEFT JOIN files f ON r.rel_path = f.rel_path
+		ORDER BY r.synced_at DESC, r.id DESC
 		LIMIT ?
 	`, limit)
 	if err != nil {
@@ -286,8 +288,12 @@ func (d *Database) GetRecentFiles(limit int) ([]RecentFileItem, error) {
 	for rows.Next() {
 		var it RecentFileItem
 		var syncedAt int64
-		if err := rows.Scan(&it.ID, &it.RelPath, &it.Action, &it.Size, &syncedAt); err != nil {
+		var fileID string
+		if err := rows.Scan(&it.ID, &it.RelPath, &it.Action, &it.Size, &syncedAt, &fileID); err != nil {
 			return items, err
+		}
+		if fileID != "" && it.Action != "delete" {
+			it.DriveLink = fmt.Sprintf("https://drive.google.com/file/d/%s/view", fileID)
 		}
 		it.SizeFormatted = FormatBytes(it.Size)
 		t := time.Unix(syncedAt, 0)

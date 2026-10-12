@@ -156,6 +156,7 @@ func (a *App) ensureEngine(ctx context.Context) (*SyncEngineGo, error) {
 	engine := NewSyncEngineGo(srv, a.db, cfg.LocalFolder, cfg.RemoteFolderID, a.broadcast)
 	engine.SetConcurrency(cfg.ConcurrentUploads)
 	engine.SetBandwidthLimit(cfg.BandwidthLimitKBPS)
+	engine.SetConflictStrategy(cfg.ConflictStrategy)
 	engine.SetIgnoreMatcher(NewIgnoreMatcher(cfg.LocalFolder, cfg.CustomIgnoreRules))
 	engine.SetProgressCallback(func(p SyncProgress) {
 		if a.ctx != nil {
@@ -573,6 +574,48 @@ func (a *App) OpenLocalFolder() error {
 	return exec.Command("explorer", absTarget).Start()
 }
 
+func (a *App) OpenLocalFile(relPath string) error {
+	cfg := GetConfig()
+	localFullPath := filepath.Join(cfg.LocalFolder, filepath.FromSlash(relPath))
+	absPath, err := filepath.Abs(localFullPath)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(absPath); err == nil {
+		return exec.Command("explorer.exe", "/select,"+absPath).Start()
+	}
+	parentDir := filepath.Dir(absPath)
+	return exec.Command("explorer.exe", parentDir).Start()
+}
+
+func (a *App) GetFileDriveURL(relPath string) (string, error) {
+	if a.db != nil {
+		files, err := a.db.GetAllFiles()
+		if err == nil {
+			if st, ok := files[relPath]; ok && st.FileID != "" {
+				return fmt.Sprintf("https://drive.google.com/file/d/%s/view", st.FileID), nil
+			}
+		}
+	}
+	cfg := GetConfig()
+	if cfg.RemoteFolderID != "" && cfg.RemoteFolderID != "root" {
+		return fmt.Sprintf("https://drive.google.com/drive/folders/%s", cfg.RemoteFolderID), nil
+	}
+	return "https://drive.google.com/drive/my-drive", nil
+}
+
+func (a *App) OpenInGoogleDrive(relPath string) error {
+	u, err := a.GetFileDriveURL(relPath)
+	if err != nil {
+		return err
+	}
+	if a.ctx != nil {
+		runtime.BrowserOpenURL(a.ctx, u)
+		return nil
+	}
+	return exec.Command("rundll32", "url.dll,FileProtocolHandler", u).Start()
+}
+
 func (a *App) GetDriveFolders() ([]FolderItem, error) {
 	ctx := context.Background()
 	srv, err := GetDriveService(ctx)
@@ -713,6 +756,10 @@ func (a *App) backgroundTicker() {
 
 		if IsAuthenticated() {
 			if a.IsPaused() {
+				continue
+			}
+
+			if cfg.QuietHoursEnabled && IsInQuietHours(time.Now(), cfg.QuietHoursStart, cfg.QuietHoursEnd) {
 				continue
 			}
 

@@ -2,8 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 )
 
 type Config struct {
@@ -21,6 +25,10 @@ type Config struct {
 	CustomIgnoreRules    []string `json:"custom_ignore_rules"`
 	NotificationsEnabled bool     `json:"notifications_enabled"`
 	BandwidthLimitKBPS   int      `json:"bandwidth_limit_kbps"`
+	ConflictStrategy     string   `json:"conflict_strategy"` // "keep_both", "local_wins", "remote_wins"
+	QuietHoursEnabled    bool     `json:"quiet_hours_enabled"`
+	QuietHoursStart      string   `json:"quiet_hours_start"` // e.g. "23:00"
+	QuietHoursEnd        string   `json:"quiet_hours_end"`   // e.g. "07:00"
 }
 
 func DefaultIgnoreRules() []string {
@@ -31,6 +39,39 @@ func DefaultIgnoreRules() []string {
 		"*.log",
 		"__pycache__",
 	}
+}
+
+func parseTimeToMinutes(s string) (int, error) {
+	parts := strings.Split(strings.TrimSpace(s), ":")
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("invalid format")
+	}
+	h, err := strconv.Atoi(parts[0])
+	if err != nil || h < 0 || h > 23 {
+		return 0, fmt.Errorf("invalid hour")
+	}
+	m, err := strconv.Atoi(parts[1])
+	if err != nil || m < 0 || m > 59 {
+		return 0, fmt.Errorf("invalid minute")
+	}
+	return h*60 + m, nil
+}
+
+func IsInQuietHours(now time.Time, startStr, endStr string) bool {
+	sMin, err1 := parseTimeToMinutes(startStr)
+	eMin, err2 := parseTimeToMinutes(endStr)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	curMin := now.Hour()*60 + now.Minute()
+	if sMin == eMin {
+		return false
+	}
+	if sMin < eMin {
+		return curMin >= sMin && curMin < eMin
+	}
+	// Overnight span e.g. 23:00 to 07:00
+	return curMin >= sMin || curMin < eMin
 }
 
 func NormalizeConfig(cfg Config) Config {
@@ -59,6 +100,15 @@ func NormalizeConfig(cfg Config) Config {
 	}
 	if cfg.BandwidthLimitKBPS < 0 {
 		cfg.BandwidthLimitKBPS = 0
+	}
+	if cfg.ConflictStrategy != "local_wins" && cfg.ConflictStrategy != "remote_wins" {
+		cfg.ConflictStrategy = "keep_both"
+	}
+	if cfg.QuietHoursStart == "" {
+		cfg.QuietHoursStart = "23:00"
+	}
+	if cfg.QuietHoursEnd == "" {
+		cfg.QuietHoursEnd = "07:00"
 	}
 	cfg.SafetyShield = true
 	return cfg
@@ -92,6 +142,10 @@ func LoadConfig() Config {
 		CustomIgnoreRules:    DefaultIgnoreRules(),
 		NotificationsEnabled: true,
 		BandwidthLimitKBPS:   0,
+		ConflictStrategy:     "keep_both",
+		QuietHoursEnabled:    false,
+		QuietHoursStart:      "23:00",
+		QuietHoursEnd:        "07:00",
 	}
 
 	data, err := os.ReadFile(cfgPath)
@@ -116,6 +170,18 @@ func LoadConfig() Config {
 		}
 		if _, hasBandwidth := rawMap["bandwidth_limit_kbps"]; !hasBandwidth {
 			appConfig.BandwidthLimitKBPS = 0
+		}
+		if _, hasConflict := rawMap["conflict_strategy"]; !hasConflict {
+			appConfig.ConflictStrategy = "keep_both"
+		}
+		if _, hasQuiet := rawMap["quiet_hours_enabled"]; !hasQuiet {
+			appConfig.QuietHoursEnabled = false
+		}
+		if _, hasQStart := rawMap["quiet_hours_start"]; !hasQStart {
+			appConfig.QuietHoursStart = "23:00"
+		}
+		if _, hasQEnd := rawMap["quiet_hours_end"]; !hasQEnd {
+			appConfig.QuietHoursEnd = "07:00"
 		}
 		appConfig = NormalizeConfig(appConfig)
 	} else {
